@@ -8,13 +8,15 @@ import 'package:backend_dart/db.dart';
 import 'package:backend_dart/routes/categorias.dart';
 
 //import ruta usuarios (Leidy Barzola)
-
+import 'package:backend_dart/routes/usuarios.dart';
 
 //import ruta productos (Hilda Angulo)
 
 
 import 'dart:convert';
 import 'package:shelf/shelf.dart';
+
+import '../lib/routes/usuarios.dart';
 
 Future<void> main() async {
   final env = DotEnv(includePlatformEnvironment: true)..load();
@@ -26,7 +28,13 @@ Future<void> main() async {
     //Handlers de productos (Hilda Angulo)
 
     //Handlers de usuarios (Leidy Barzola)
-    
+    ..get('/usuarios', usuariosHandler)
+    ..post('/usuarios', crearUsuarioHandler)
+    ..delete('/usuarios/<id>', eliminarUsuarioHandler)
+    ..get('/usuario/admin', adminUsuariosPageHandler)
+
+    ..options('/<ignored|.*>', _optionsHandler);
+
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(_corsMiddleware)
