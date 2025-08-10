@@ -3,10 +3,16 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
 import 'package:dotenv/dotenv.dart'; 
-import 'package:backend_dart/routes/productos.dart';
 import 'package:backend_dart/db.dart';
+//import ruta categorías (Alejandro Sornoza)
 import 'package:backend_dart/routes/categorias.dart';
-import 'package:backend_dart/routes/usuarios.dart';
+
+//import ruta usuarios (Leidy Barzola)
+
+
+//import ruta productos (Hilda Angulo)
+
+
 import 'dart:convert';
 import 'package:shelf/shelf.dart';
 
@@ -15,19 +21,12 @@ Future<void> main() async {
   await initDb(env: env);
   final router = Router()
     ..get('/', rootHandler)
-    ..get('/usuarios', usuariosHandler)
-    ..get('/categorias', categoriasHandler)
-    ..post('/usuarios', crearUsuarioHandler)
-    ..delete('/usuarios/<id>', eliminarUsuarioHandler)
-    ..get('/usuarios/admin', adminUsuariosPageHandler)
-    ..get('/productos', (req) => Response.found('/productos/'))
-    ..mount('/productos/', Router()
-      ..get('/', productosHandler)
-      ..post('/', crearProductoHandler)
-      ..delete('/<id>', eliminarProductoHandler)
-      ..get('/admin', adminProductosPageHandler)
-    )
-    ..options('/<ignored|.*>', _optionsHandler);
+    //Handler de categorias (Alejandro Sornoza)
+    ..get('/categorias', categoriasHandler);
+    //Handlers de productos (Hilda Angulo)
+
+    //Handlers de usuarios (Leidy Barzola)
+    
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(_corsMiddleware)
