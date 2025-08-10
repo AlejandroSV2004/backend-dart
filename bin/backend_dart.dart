@@ -11,6 +11,7 @@ import 'package:backend_dart/routes/categorias.dart';
 
 
 //import ruta productos (Hilda Angulo)
+import 'package:backend_dart/routes/productos.dart';
 
 
 import 'dart:convert';
@@ -24,7 +25,14 @@ Future<void> main() async {
     //Handler de categorias (Alejandro Sornoza)
     ..get('/categorias', categoriasHandler);
     //Handlers de productos (Hilda Angulo)
-
+    ..get('/usuarios/admin', adminUsuariosPageHandler)
+    ..get('/productos', (req) => Response.found('/productos/'))
+    ..mount('/productos/', Router()
+      ..get('/', productosHandler)
+      ..post('/', crearProductoHandler)
+      ..delete('/<id>', eliminarProductoHandler)
+      ..get('/admin', adminProductosPageHandler)
+    )
     //Handlers de usuarios (Leidy Barzola)
     
   final handler = Pipeline()
