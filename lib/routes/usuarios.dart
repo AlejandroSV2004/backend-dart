@@ -25,6 +25,65 @@ bool _toBool(dynamic v) {
   return false;
 }
 
+/// ---------- POST /usuarios/login ----------
+/// body: { correo, contrasena }
+/// 200 => { id, correo, nombre_usuario, foto_perfil, es_negocio }
+/// 401 => { error: 'Credenciales inválidas' }
+Future<Response> loginUsuarioHandler(Request req) async {
+  try {
+    final bodyStr = await req.readAsString();
+    final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
+
+    final correo = (j['correo'] ?? '').toString().trim();
+    final pass   = (j['contrasena'] ?? '').toString();
+
+    if (correo.isEmpty || pass.isEmpty) {
+      return Response(400,
+        body: jsonEncode({'error':'Faltan correo y/o contrasena'}),
+        headers: _jsonHeaders);
+    }
+
+    // DEMO: contrasena en texto plano. En producción usa hash (bcrypt/argon2) y comparación segura.
+    final rs = await dbQuery('''
+      SELECT
+        id_usuario      AS id,
+        correo,
+        nombre_usuario,
+        foto_perfil,
+        es_negocio
+      FROM usuarios
+      WHERE correo = ? AND contrasena = ?
+      LIMIT 1
+    ''', [correo, pass]);
+
+    if (rs.isEmpty) {
+      return Response(401,
+        body: jsonEncode({'error':'Credenciales inválidas'}),
+        headers: _jsonHeaders);
+    }
+
+    final u = rs.first;
+    final user = {
+      'id'            : _jsonSafe(u['id']),
+      'correo'        : _jsonSafe(u['correo']),
+      'nombre_usuario': _jsonSafe(u['nombre_usuario']),
+      'foto_perfil'   : _jsonSafe(u['foto_perfil']),
+      'es_negocio'    : _toBool(u['es_negocio']),
+    };
+
+    // Si quieres token de demo:
+    // final token = base64Url.encode(utf8.encode('${user['id']}:${DateTime.now().millisecondsSinceEpoch}'));
+    // return Response.ok(jsonEncode({'ok': true, 'user': user, 'token': token}), headers: _jsonHeaders);
+
+    return Response.ok(jsonEncode({'ok': true, 'user': user}), headers: _jsonHeaders);
+  } catch (e, st) {
+    print('Error POST /usuarios/login: $e\n$st');
+    return Response.internalServerError(
+      body: jsonEncode({'error':'Error interno del servidor'}),
+      headers: _jsonHeaders);
+  }
+}
+
 /// ---------- GET /usuarios ----------
 /// Por defecto: ARRAY plano. Compat: ?wrap=1 => { ok, count, data }
 Future<Response> usuariosHandler(Request req) async {
@@ -75,8 +134,7 @@ Future<Response> crearUsuarioHandler(Request req) async {
     final correo = (j['correo'] ?? '').toString().trim();
     final nombre = (j['nombre_usuario'] ?? '').toString().trim();
     final foto   = (j['foto_perfil'] ?? '').toString().trim();
-    // DEMO: en producción, hashear (bcrypt/argon2) y NUNCA devolver el hash.
-    final pass   = (j['contrasena'] ?? '').toString();
+    final pass   = (j['contrasena'] ?? '').toString(); // DEMO
     final esNeg  = (j['es_negocio'] == true || j['es_negocio'] == 1 || '${j['es_negocio']}'.toLowerCase()=='true') ? 1 : 0;
 
     if (id.isEmpty || correo.isEmpty || nombre.isEmpty) {
@@ -92,7 +150,6 @@ Future<Response> crearUsuarioHandler(Request req) async {
       );
     } on MySqlException catch (e) {
       if (e.errorNumber == 1062) {
-        // Duplicado por PK o índice único (id o correo)
         return Response(409,
           body: jsonEncode({'error':'Usuario ya existe (id o correo duplicado)'}),
           headers: _jsonHeaders);
@@ -142,7 +199,6 @@ Future<Response> eliminarUsuarioHandler(Request req, String id) async {
 }
 
 /// ---------- GET /usuarios/admin (demo HTML) ----------
-/// Ajustado para soportar ARRAY o {ok,data}
 Future<Response> adminUsuariosPageHandler(Request req) async {
   const html = r'''
 <!doctype html>
@@ -181,7 +237,7 @@ const api=(p,o={})=>fetch(p,o).then(r=>r.json());
 const toList = (r) => Array.isArray(r) ? r : (r?.data ?? []);
 
 async function cargar(){
-  const res = await api('/usuarios'); // o '/usuarios?wrap=1'
+  const res = await api('/usuarios');
   const list = toList(res);
   const tbody = document.querySelector('#tabla tbody');
   tbody.innerHTML = '';

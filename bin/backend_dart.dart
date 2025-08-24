@@ -8,14 +8,16 @@ import 'package:dotenv/dotenv.dart';
 
 import 'package:backend_dart/db.dart';
 
+// Rutas
 import 'package:backend_dart/routes/categorias.dart';
-import 'package:backend_dart/routes/usuarios.dart';
-import 'package:backend_dart/routes/productos.dart';
-
+import 'package:backend_dart/routes/usuarios.dart';          // incluye loginUsuarioHandler
+import 'package:backend_dart/routes/productos.dart';        // incluye productosPorCategoriaHandler
 import 'package:backend_dart/routes/resenas.dart';
 import 'package:backend_dart/routes/carrito.dart';
 import 'package:backend_dart/routes/producto.dart';
 import 'package:backend_dart/routes/productos_vendedor.dart';
+
+const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
 Future<void> main() async {
   final env = DotEnv(includePlatformEnvironment: true)..load();
@@ -24,31 +26,45 @@ Future<void> main() async {
 
   final router = Router()
     ..get('/', rootHandler)
-    // Categorías
+
+    // ---------- Categorías ----------
     ..get('/categorias', categoriasHandler)
-    // Productos (grupo montado)
+
+    // ---------- Productos (grupo) ----------
+    // Canonicaliza /productos -> /productos/
     ..get('/productos', (req) => Response.found('/productos/'))
     ..mount(
       '/productos/',
       Router()
+        // Lista completa
         ..get('/', productosHandler)
+        // Crear
         ..post('/', crearProductoHandler)
-        ..delete('/<id>', eliminarProductoHandler)
-        ..get('/admin', adminProductosPageHandler),
+        // Página admin (defínela ANTES que la dinámica)
+        ..get('/admin', adminProductosPageHandler)
+        // Productos por categoría (slug o código)
+        ..get('/<slug>', productosPorCategoriaHandler)
+        // Eliminar por id (DELETE)
+        ..delete('/<id>', eliminarProductoHandler),
     )
-    // Usuarios
+
+    // ---------- Usuarios ----------
+    // Login PRIMERO para evitar choques con patrones dinámicos
+    ..post('/usuarios/login', loginUsuarioHandler)
     ..get('/usuarios', usuariosHandler)
     ..post('/usuarios', crearUsuarioHandler)
     ..delete('/usuarios/<id>', eliminarUsuarioHandler)
     ..get('/usuarios/admin', adminUsuariosPageHandler)
-    // Producto (detalle + update)
+
+    // ---------- Producto (detalle + update) ----------
     ..mount(
       '/producto/',
       Router()
         ..get('/<id>', productoGetHandler)
         ..put('/<id>', productoUpdateHandler),
     )
-    // Reseñas
+
+    // ---------- Reseñas ----------
     ..mount(
       '/resenas/',
       Router()
@@ -56,7 +72,8 @@ Future<void> main() async {
         ..post('/<id_producto>', crearResenaHandler)
         ..delete('/<id>', eliminarResenaHandler),
     )
-    // Carrito
+
+    // ---------- Carrito ----------
     ..mount(
       '/carrito/',
       Router()
@@ -66,21 +83,36 @@ Future<void> main() async {
         ..delete('/eliminar', eliminarItemCarritoHandler)
         ..delete('/vaciar/<id_usuario>', vaciarCarritoHandler),
     )
-    // Productos por vendedor
+
+    // ---------- Productos por vendedor ----------
     ..mount(
       '/productosVendedor/',
       Router()..get('/<vendedorId>', productosDeVendedorHandler),
     )
-    // Preflight CORS explícito (aunque el middleware ya lo maneja)
+
+    // ---------- Preflight CORS ----------
     ..options('/<ignored|.*>', _optionsHandler);
 
+  // Pipeline + CORS
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(_corsMiddleware)
       .addHandler(router);
 
+  // Envolver para devolver 404 en JSON (evita "Route not found" texto plano)
+  Future<Response> app(Request req) async {
+    final res = await handler(req);
+    if (res.statusCode == 404) {
+      return Response.notFound(
+        jsonEncode({'error': 'Route not found', 'path': '/${req.url}'}),
+        headers: _jsonHeaders,
+      );
+    }
+    return res;
+  }
+
   final port = int.tryParse(env['PORT'] ?? '') ?? 8080;
-  final server = await io.serve(handler, InternetAddress.anyIPv4, port);
+  final server = await io.serve(app, InternetAddress.anyIPv4, port);
   print('Backend escuchando en http://${server.address.host}:$port');
 
   // Apagado limpio (CTRL+C y SIGTERM)
@@ -121,9 +153,5 @@ Future<Response> rootHandler(Request req) async {
     'uptime_s': DateTime.now().difference(_startedAt).inSeconds,
     'db': await dbAlive() ? 'up' : 'down',
   };
-  return Response.ok(
-    jsonEncode(body),
-    headers: {'Content-Type': 'application/json; charset=utf-8'},
-  );
+  return Response.ok(jsonEncode(body), headers: _jsonHeaders);
 }
-

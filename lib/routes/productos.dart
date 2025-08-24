@@ -25,9 +25,10 @@ bool _toBool(dynamic v) {
   return false;
 }
 
-// ---- GET /productos ----
-// Por defecto: ARRAY plano
-// Compat: ?wrap=1 => { ok, count, data }
+/* =========================
+ *   GET /productos  (lista)
+ *   ARRAY plano por defecto. ?wrap=1 => { ok, count, data }
+ * ========================= */
 Future<Response> productosHandler(Request req) async {
   try {
     final rs = await dbQuery('''
@@ -75,8 +76,97 @@ Future<Response> productosHandler(Request req) async {
   }
 }
 
-// ---- POST /productos ----
-// Devuelve el OBJETO creado (plano). Compat: ?wrap=1 => { ok, data }
+/* ===========================================
+ *   GET /productos/<slug>
+ *   Productos por categoría (por slug o código)
+ *   ARRAY plano por defecto. ?wrap=1 => { ok, total, page, limit, data }
+ *   Paginación: ?page=1&limit=24
+ * =========================================== */
+Future<Response> productosPorCategoriaHandler(Request req, String slugOrCodigo) async {
+  try {
+    final qp = req.url.queryParameters;
+    final limit = (int.tryParse(qp['limit'] ?? '') ?? 24).clamp(1, 1000);
+    final page  = (int.tryParse(qp['page']  ?? '') ?? 1).clamp(1, 100000);
+    final offset = (page - 1) * limit;
+
+    final cnt = await dbQuery('''
+      SELECT COUNT(*) AS total
+      FROM productos p
+      JOIN categorias c ON c.codigo_categoria = p.codigo_categoria
+      WHERE c.slug = ? OR p.codigo_categoria = ?
+    ''', [slugOrCodigo, slugOrCodigo]);
+    final total = (cnt.first['total'] as num?)?.toInt() ?? 0;
+
+    final rs = await dbQuery('''
+      SELECT
+        p.id_producto                AS id,
+        p.id_vendedor,
+        p.nombre,
+        CAST(p.descripcion AS CHAR)  AS descripcion,
+        p.precio,
+        p.estado,
+        p.envio_rapido,
+        p.codigo_categoria,
+        c.slug                       AS categoria_slug,
+        c.nombre                     AS categoria_nombre,
+        p.stock,
+        (
+          SELECT CAST(fp.url AS CHAR)
+          FROM fotos_producto fp
+          WHERE fp.id_producto = p.id_producto
+          ORDER BY fp.id_foto ASC
+          LIMIT 1
+        ) AS imagen
+      FROM productos p
+      JOIN categorias c ON c.codigo_categoria = p.codigo_categoria
+      WHERE c.slug = ? OR p.codigo_categoria = ?
+      ORDER BY p.id_producto DESC
+      LIMIT ? OFFSET ?
+    ''', [slugOrCodigo, slugOrCodigo, limit, offset]);
+
+    final data = rs.map((r) {
+      final precio = (r['precio'] as num?)?.toDouble() ?? 0.0;
+      final stock  = (r['stock']  as num?)?.toInt() ?? 0;
+      return {
+        'id'              : _jsonSafe(r['id']),
+        'id_vendedor'     : _jsonSafe(r['id_vendedor']),
+        'nombre'          : _jsonSafe(r['nombre']),
+        'descripcion'     : _jsonSafe(r['descripcion']),
+        'precio'          : precio,
+        'estado'          : _jsonSafe(r['estado']),
+        'envio_rapido'    : _toBool(r['envio_rapido']),
+        'codigo_categoria': _jsonSafe(r['codigo_categoria']),
+        'categoria'       : {
+          'slug'  : _jsonSafe(r['categoria_slug']),
+          'nombre': _jsonSafe(r['categoria_nombre']),
+        },
+        'stock'           : stock,
+        'imagen'          : _jsonSafe(r['imagen']),
+      };
+    }).toList();
+
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'total': total, 'page': page, 'limit': limit, 'data': data})
+      : jsonEncode(data);
+
+    return Response.ok(body, headers: {
+      ..._jsonHeaders,
+      'X-Total-Count': total.toString(),
+    });
+  } catch (e, st) {
+    print('Error GET /productos/$slugOrCodigo: $e\n$st');
+    return Response.internalServerError(
+      body: jsonEncode({'error': 'Error interno del servidor'}),
+      headers: _jsonHeaders,
+    );
+  }
+}
+
+/* =========================
+ *   POST /productos  (crear)
+ *   Devuelve OBJETO creado. ?wrap=1 => { ok, data }
+ * ========================= */
 Future<Response> crearProductoHandler(Request req) async {
   try {
     final j = jsonDecode(await req.readAsString()) as Map<String, dynamic>;
@@ -106,7 +196,6 @@ Future<Response> crearProductoHandler(Request req) async {
 
     final newId = ins.insertId;
 
-    // Construimos respuesta plana (sin segundo SELECT)
     final created = {
       'id'              : newId,
       'id_vendedor'     : idVendedor,
@@ -133,7 +222,9 @@ Future<Response> crearProductoHandler(Request req) async {
   }
 }
 
-// ---- DELETE /productos/<id> ----
+/* =========================
+ *   DELETE /productos/<id>
+ * ========================= */
 Future<Response> eliminarProductoHandler(Request req, String id) async {
   try {
     final idNum = int.tryParse(id);
@@ -159,8 +250,11 @@ Future<Response> eliminarProductoHandler(Request req, String id) async {
   }
 }
 
-// ---- Página demo admin (opcional) ----
-// Ajustada para soportar ARRAY o {ok,data}
+/* =====================================
+ *   Página demo admin (mover a /admin/productos)
+ *   (si la montas en /productos/admin, regístrala
+ *   antes que la ruta dinámica <slug> para evitar choque)
+ * ===================================== */
 Future<Response> adminProductosPageHandler(Request req) async {
   const html = r'''
 <!doctype html><html lang="es"><meta charset="utf-8">
@@ -191,10 +285,10 @@ Future<Response> adminProductosPageHandler(Request req) async {
 </thead><tbody></tbody></table>
 <script>
 const api=(p,o={})=>fetch(p,o).then(r=>r.json());
-function toList(r){ return Array.isArray(r) ? r : (r?.data ?? []); }
+const toList=r=>Array.isArray(r)?r:(r?.data??[]);
 
 async function cargar(){
-  const r = await api('/productos'); // también puedes usar '/productos?wrap=1'
+  const r = await api('/productos?wrap=1');
   const list = toList(r);
   const tb = document.querySelector('#tabla tbody'); tb.innerHTML='';
   list.forEach(p=>{
@@ -206,9 +300,7 @@ async function cargar(){
     tb.appendChild(tr);
   });
 }
-
 document.querySelector('#refrescar').onclick=cargar;
-
 document.querySelector('#crear').onclick=async()=>{
   const body={
     id_vendedor:document.querySelector('#id_vendedor').value,
@@ -226,14 +318,12 @@ document.querySelector('#crear').onclick=async()=>{
     cargar();
   } else alert('Error al crear');
 };
-
 document.addEventListener('click',async e=>{
   const b=e.target.closest('.del'); if(!b) return;
   const id=b.getAttribute('data-id');
   const r=await fetch('/productos/'+encodeURIComponent(id),{method:'DELETE'});
   if(r.ok)cargar(); else alert('Error al borrar');
 });
-
 cargar();
 </script></html>
 ''';
