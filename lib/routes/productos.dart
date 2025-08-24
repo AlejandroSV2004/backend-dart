@@ -4,6 +4,8 @@ import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
 import 'package:mysql1/mysql1.dart' show Blob;
 
+const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
+
 dynamic _jsonSafe(Object? v) {
   if (v == null) return null;
   if (v is DateTime) return v.toIso8601String();
@@ -18,20 +20,22 @@ dynamic _jsonSafe(Object? v) {
 
 bool _toBool(dynamic v) {
   if (v is bool) return v;
-  if (v is num) return v != 0;
+  if (v is num)  return v != 0;
   if (v is String) return v == '1' || v.toLowerCase() == 'true';
   return false;
 }
 
 // ---- GET /productos ----
+// Por defecto: ARRAY plano
+// Compat: ?wrap=1 => { ok, count, data }
 Future<Response> productosHandler(Request req) async {
   try {
     final rs = await dbQuery('''
       SELECT
-        id_producto   AS id,
+        id_producto                AS id,
         id_vendedor,
         nombre,
-        CAST(descripcion AS CHAR) AS descripcion,
+        CAST(descripcion AS CHAR)  AS descripcion,
         precio,
         estado,
         envio_rapido,
@@ -41,32 +45,38 @@ Future<Response> productosHandler(Request req) async {
       ORDER BY id_producto DESC
     ''');
 
-    final data = rs.map((r) => {
-      'id'              : _jsonSafe(r['id']),
-      'id_vendedor'     : _jsonSafe(r['id_vendedor']),
-      'nombre'          : _jsonSafe(r['nombre']),
-      'descripcion'     : _jsonSafe(r['descripcion']),
-      'precio'          : r['precio'], // num/double
-      'estado'          : _jsonSafe(r['estado']),
-      'envio_rapido'    : _toBool(r['envio_rapido']),
-      'codigo_categoria': _jsonSafe(r['codigo_categoria']),
-      'stock'           : r['stock'],
+    final data = rs.map((r) {
+      final precio = (r['precio'] as num?)?.toDouble() ?? 0.0;
+      final stock  = (r['stock']  as num?)?.toInt() ?? 0;
+      return {
+        'id'              : _jsonSafe(r['id']),
+        'id_vendedor'     : _jsonSafe(r['id_vendedor']),
+        'nombre'          : _jsonSafe(r['nombre']),
+        'descripcion'     : _jsonSafe(r['descripcion']),
+        'precio'          : precio,
+        'estado'          : _jsonSafe(r['estado']),
+        'envio_rapido'    : _toBool(r['envio_rapido']),
+        'codigo_categoria': _jsonSafe(r['codigo_categoria']),
+        'stock'           : stock,
+      };
     }).toList();
 
-    return Response.ok(
-      jsonEncode({'ok': true, 'count': data.length, 'data': data}),
-      headers: {'Content-Type':'application/json; charset=utf-8'},
-    );
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'count': data.length, 'data': data})
+      : jsonEncode(data);
+
+    return Response.ok(body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error GET /productos: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'},
-    );
+      body: jsonEncode({'error': 'Error interno del servidor'}),
+      headers: _jsonHeaders);
   }
 }
 
 // ---- POST /productos ----
+// Devuelve el OBJETO creado (plano). Compat: ?wrap=1 => { ok, data }
 Future<Response> crearProductoHandler(Request req) async {
   try {
     final j = jsonDecode(await req.readAsString()) as Map<String, dynamic>;
@@ -74,49 +84,52 @@ Future<Response> crearProductoHandler(Request req) async {
     final idVendedor = (j['id_vendedor'] ?? '').toString().trim();
     final nombre     = (j['nombre'] ?? '').toString().trim();
     final desc       = (j['descripcion'] ?? '').toString();
-    final precio     = num.tryParse('${j['precio']}');
+    final precioNum  = num.tryParse('${j['precio']}');
     final estado     = (j['estado'] ?? '').toString().trim(); // 'Disponible' | 'Agotado' | 'En Oferta'
     final envioRap   = (j['envio_rapido'] == true || j['envio_rapido'] == 1 || '${j['envio_rapido']}'.toLowerCase()=='true') ? 1 : 0;
     final codCat     = (j['codigo_categoria'] ?? '').toString().trim();
-    final stock      = int.tryParse('${j['stock']}');
+    final stockInt   = int.tryParse('${j['stock']}');
 
     const ESTADOS = {'Disponible','Agotado','En Oferta'};
 
-    if (idVendedor.isEmpty || nombre.isEmpty || precio == null || !ESTADOS.contains(estado) || codCat.isEmpty || stock == null) {
+    if (idVendedor.isEmpty || nombre.isEmpty || precioNum == null || !ESTADOS.contains(estado) || codCat.isEmpty || stockInt == null) {
       return Response(400,
         body: jsonEncode({'error':'Requeridos: id_vendedor, nombre, precio(num), estado(Disponible|Agotado|En Oferta), codigo_categoria, stock(int)'}),
-        headers: {'Content-Type':'application/json; charset=utf-8'});
+        headers: _jsonHeaders);
     }
 
-    final res = await dbQuery(
-      '''
+    final ins = await dbQuery('''
       INSERT INTO productos
         (id_vendedor, nombre, descripcion, precio, estado, envio_rapido, codigo_categoria, stock)
       VALUES (?,?,?,?,?,?,?,?)
-      ''',
-      [idVendedor, nombre, desc, precio, estado, envioRap, codCat, stock],
-    );
+    ''', [idVendedor, nombre, desc, precioNum, estado, envioRap, codCat, stockInt]);
 
-    final newId = res.insertId;
+    final newId = ins.insertId;
 
-    return Response(201,
-      body: jsonEncode({'ok': true, 'data': {
-        'id': newId,
-        'id_vendedor': idVendedor,
-        'nombre': nombre,
-        'descripcion': desc,
-        'precio': precio,
-        'estado': estado,
-        'envio_rapido': envioRap == 1,
-        'codigo_categoria': codCat,
-        'stock': stock,
-      }}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    // Construimos respuesta plana (sin segundo SELECT)
+    final created = {
+      'id'              : newId,
+      'id_vendedor'     : idVendedor,
+      'nombre'          : nombre,
+      'descripcion'     : desc,
+      'precio'          : (precioNum as num).toDouble(),
+      'estado'          : estado,
+      'envio_rapido'    : envioRap == 1,
+      'codigo_categoria': codCat,
+      'stock'           : stockInt,
+    };
+
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'data': created})
+      : jsonEncode(created);
+
+    return Response(201, body: body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error POST /productos: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+      headers: _jsonHeaders);
   }
 }
 
@@ -127,7 +140,7 @@ Future<Response> eliminarProductoHandler(Request req, String id) async {
     if (idNum == null) {
       return Response(400,
         body: jsonEncode({'error':'id de producto inválido'}),
-        headers: {'Content-Type':'application/json; charset=utf-8'});
+        headers: _jsonHeaders);
     }
 
     final r = await dbQuery('DELETE FROM productos WHERE id_producto = ?', [idNum]);
@@ -135,18 +148,19 @@ Future<Response> eliminarProductoHandler(Request req, String id) async {
     if (n == 0) {
       return Response(404,
         body: jsonEncode({'error':'No existe el producto $idNum'}),
-        headers: {'Content-Type':'application/json; charset=utf-8'});
+        headers: _jsonHeaders);
     }
-    return Response.ok(jsonEncode({'ok': true, 'deleted': idNum}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    return Response.ok(jsonEncode({'ok': true, 'deleted': idNum}), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error DELETE /productos/$id: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+      headers: _jsonHeaders);
   }
 }
 
+// ---- Página demo admin (opcional) ----
+// Ajustada para soportar ARRAY o {ok,data}
 Future<Response> adminProductosPageHandler(Request req) async {
   const html = r'''
 <!doctype html><html lang="es"><meta charset="utf-8">
@@ -177,9 +191,13 @@ Future<Response> adminProductosPageHandler(Request req) async {
 </thead><tbody></tbody></table>
 <script>
 const api=(p,o={})=>fetch(p,o).then(r=>r.json());
+function toList(r){ return Array.isArray(r) ? r : (r?.data ?? []); }
+
 async function cargar(){
-  const r=await api('/productos'); const tb=document.querySelector('#tabla tbody'); tb.innerHTML='';
-  (r.data||[]).forEach(p=>{
+  const r = await api('/productos'); // también puedes usar '/productos?wrap=1'
+  const list = toList(r);
+  const tb = document.querySelector('#tabla tbody'); tb.innerHTML='';
+  list.forEach(p=>{
     const tr=document.createElement('tr');
     tr.innerHTML=`
       <td>${p.id}</td><td>${p.nombre||''}</td><td>${p.precio}</td>
@@ -188,7 +206,9 @@ async function cargar(){
     tb.appendChild(tr);
   });
 }
+
 document.querySelector('#refrescar').onclick=cargar;
+
 document.querySelector('#crear').onclick=async()=>{
   const body={
     id_vendedor:document.querySelector('#id_vendedor').value,
@@ -201,15 +221,19 @@ document.querySelector('#crear').onclick=async()=>{
     stock:document.querySelector('#stock').value,
   };
   const r=await fetch('/productos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  if(r.ok){document.querySelectorAll('input').forEach(i=>{if(i.type!=='checkbox')i.value=''; else i.checked=false;});cargar();}
-  else alert('Error al crear');
+  if(r.ok){
+    document.querySelectorAll('input').forEach(i=>{if(i.type!=='checkbox')i.value=''; else i.checked=false;});
+    cargar();
+  } else alert('Error al crear');
 };
+
 document.addEventListener('click',async e=>{
   const b=e.target.closest('.del'); if(!b) return;
   const id=b.getAttribute('data-id');
   const r=await fetch('/productos/'+encodeURIComponent(id),{method:'DELETE'});
   if(r.ok)cargar(); else alert('Error al borrar');
 });
+
 cargar();
 </script></html>
 ''';

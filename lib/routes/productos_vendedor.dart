@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
 
+const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
+
 dynamic _jsonSafe(Object? v) {
   if (v == null) return null;
   if (v is DateTime) return v.toIso8601String();
@@ -11,8 +13,9 @@ dynamic _jsonSafe(Object? v) {
 
 Future<Response> productosDeVendedorHandler(Request req, String vendedorId) async {
   if (vendedorId.isEmpty) {
-    return Response(400, body: jsonEncode({'error':'Falta el ID del vendedor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    return Response(400,
+      body: jsonEncode({'error': 'Falta el ID del vendedor'}),
+      headers: _jsonHeaders);
   }
 
   try {
@@ -24,7 +27,7 @@ Future<Response> productosDeVendedorHandler(Request req, String vendedorId) asyn
         p.estado,
         p.stock,
         (
-          SELECT CAST(fp.url AS CHAR) 
+          SELECT CAST(fp.url AS CHAR)
           FROM fotos_producto fp
           WHERE fp.id_producto = p.id_producto
           ORDER BY fp.id_foto ASC
@@ -35,21 +38,29 @@ Future<Response> productosDeVendedorHandler(Request req, String vendedorId) asyn
       ORDER BY p.id_producto DESC
     ''', [vendedorId]);
 
-    final data = rs.map((r) => {
-      'id'     : _jsonSafe(r['id']),
-      'nombre' : _jsonSafe(r['nombre']),
-      'precio' : r['precio'],
-      'estado' : _jsonSafe(r['estado']),
-      'stock'  : r['stock'],
-      'imagen' : _jsonSafe(r['imagen']),
+    final data = rs.map((r) {
+      final precio = (r['precio'] as num?)?.toDouble() ?? 0.0;
+      final stock  = (r['stock']  as num?)?.toInt() ?? 0;
+      return {
+        'id'     : _jsonSafe(r['id']),
+        'nombre' : _jsonSafe(r['nombre']),
+        'precio' : precio,
+        'estado' : _jsonSafe(r['estado']),
+        'stock'  : stock,
+        'imagen' : _jsonSafe(r['imagen']),
+      };
     }).toList();
 
-    return Response.ok(jsonEncode({'ok': true, 'count': data.length, 'data': data}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'count': data.length, 'data': data})
+      : jsonEncode(data);
+
+    return Response.ok(body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error GET /productosVendedor/$vendedorId: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+      body: jsonEncode({'error': 'Error interno del servidor'}),
+      headers: _jsonHeaders);
   }
 }

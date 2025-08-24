@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
-import 'package:mysql1/mysql1.dart' show Blob;
+import 'package:mysql1/mysql1.dart' show Blob, MySqlException;
+
+const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
 dynamic _jsonSafe(Object? v) {
   if (v == null) return null;
@@ -23,12 +25,13 @@ bool _toBool(dynamic v) {
   return false;
 }
 
-// ---------- GET /usuarios ----------
-Future<Response> usuariosHandler(Request request) async {
+/// ---------- GET /usuarios ----------
+/// Por defecto: ARRAY plano. Compat: ?wrap=1 => { ok, count, data }
+Future<Response> usuariosHandler(Request req) async {
   try {
     final rs = await dbQuery('''
       SELECT
-        id_usuario   AS id,
+        id_usuario      AS id,
         correo,
         nombre_usuario,
         foto_perfil,
@@ -45,57 +48,81 @@ Future<Response> usuariosHandler(Request request) async {
       'es_negocio'    : _toBool(r['es_negocio']),
     }).toList();
 
-    return Response.ok(
-      jsonEncode({'ok': true, 'count': data.length, 'data': data}),
-      headers: {'Content-Type': 'application/json; charset=utf-8'},
-    );
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'count': data.length, 'data': data})
+      : jsonEncode(data);
+
+    return Response.ok(body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error GET /usuarios: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error interno del servidor'}),
-      headers: {'Content-Type': 'application/json; charset=utf-8'},
+      headers: _jsonHeaders,
     );
   }
 }
 
-// ---------- POST /usuarios ----------
+/// ---------- POST /usuarios ----------
+/// body: { id, correo, nombre_usuario, foto_perfil?, contrasena?, es_negocio? }
+/// Devuelve OBJETO creado. Compat: ?wrap=1 => { ok, data }
 Future<Response> crearUsuarioHandler(Request req) async {
   try {
-    final body = await req.readAsString();
-    final j = jsonDecode(body) as Map<String, dynamic>;
+    final bodyStr = await req.readAsString();
+    final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
 
     final id     = (j['id'] ?? j['id_usuario'] ?? '').toString().trim();
     final correo = (j['correo'] ?? '').toString().trim();
     final nombre = (j['nombre_usuario'] ?? '').toString().trim();
     final foto   = (j['foto_perfil'] ?? '').toString().trim();
-    final pass   = (j['contrasena'] ?? '').toString(); // DEMO: en real, hashear
+    // DEMO: en producción, hashear (bcrypt/argon2) y NUNCA devolver el hash.
+    final pass   = (j['contrasena'] ?? '').toString();
     final esNeg  = (j['es_negocio'] == true || j['es_negocio'] == 1 || '${j['es_negocio']}'.toLowerCase()=='true') ? 1 : 0;
 
     if (id.isEmpty || correo.isEmpty || nombre.isEmpty) {
       return Response(400,
         body: jsonEncode({'error':'Campos requeridos: id, correo, nombre_usuario'}),
-        headers: {'Content-Type':'application/json; charset=utf-8'});
+        headers: _jsonHeaders);
     }
 
-    await dbQuery(
-      'INSERT INTO usuarios (id_usuario, correo, nombre_usuario, foto_perfil, contrasena, es_negocio) VALUES (?,?,?,?,?,?)',
-      [id, correo, nombre, foto.isEmpty ? null : foto, pass, esNeg],
-    );
+    try {
+      await dbQuery(
+        'INSERT INTO usuarios (id_usuario, correo, nombre_usuario, foto_perfil, contrasena, es_negocio) VALUES (?,?,?,?,?,?)',
+        [id, correo, nombre, foto.isEmpty ? null : foto, pass, esNeg],
+      );
+    } on MySqlException catch (e) {
+      if (e.errorNumber == 1062) {
+        // Duplicado por PK o índice único (id o correo)
+        return Response(409,
+          body: jsonEncode({'error':'Usuario ya existe (id o correo duplicado)'}),
+          headers: _jsonHeaders);
+      }
+      rethrow;
+    }
 
-    return Response(201,
-      body: jsonEncode({'ok': true, 'data': {
-        'id': id, 'correo': correo, 'nombre_usuario': nombre, 'foto_perfil': foto.isEmpty?null:foto, 'es_negocio': esNeg==1
-      }}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    final created = {
+      'id'            : id,
+      'correo'        : correo,
+      'nombre_usuario': nombre,
+      'foto_perfil'   : foto.isEmpty ? null : foto,
+      'es_negocio'    : esNeg == 1,
+    };
+
+    final wrap = req.url.queryParameters['wrap'] == '1';
+    final body = wrap
+      ? jsonEncode({'ok': true, 'data': created})
+      : jsonEncode(created);
+
+    return Response(201, body: body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error POST /usuarios: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+      headers: _jsonHeaders);
   }
 }
 
-// ---------- DELETE /usuarios/<id> ----------
+/// ---------- DELETE /usuarios/<id> ----------
 Future<Response> eliminarUsuarioHandler(Request req, String id) async {
   try {
     final r = await dbQuery('DELETE FROM usuarios WHERE id_usuario = ?', [id]);
@@ -103,19 +130,19 @@ Future<Response> eliminarUsuarioHandler(Request req, String id) async {
     if (n == 0) {
       return Response(404,
         body: jsonEncode({'error':'No existe el usuario $id'}),
-        headers: {'Content-Type':'application/json; charset=utf-8'});
+        headers: _jsonHeaders);
     }
-    return Response.ok(jsonEncode({'ok': true, 'deleted': id}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+    return Response.ok(jsonEncode({'ok': true, 'deleted': id}), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error DELETE /usuarios/$id: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: {'Content-Type':'application/json; charset=utf-8'});
+      headers: _jsonHeaders);
   }
 }
 
-// ---------- GET /usuarios/admin  ----------
+/// ---------- GET /usuarios/admin (demo HTML) ----------
+/// Ajustado para soportar ARRAY o {ok,data}
 Future<Response> adminUsuariosPageHandler(Request req) async {
   const html = r'''
 <!doctype html>
@@ -150,13 +177,15 @@ Future<Response> adminUsuariosPageHandler(Request req) async {
 </table>
 
 <script>
-const api = (p,o={}) => fetch(p,o).then(r => r.json());
+const api=(p,o={})=>fetch(p,o).then(r=>r.json());
+const toList = (r) => Array.isArray(r) ? r : (r?.data ?? []);
 
 async function cargar(){
-  const res = await api('/usuarios');
+  const res = await api('/usuarios'); // o '/usuarios?wrap=1'
+  const list = toList(res);
   const tbody = document.querySelector('#tabla tbody');
   tbody.innerHTML = '';
-  (res.data || []).forEach(u => {
+  list.forEach(u => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${u.id}</td>
