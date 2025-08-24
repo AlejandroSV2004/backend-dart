@@ -16,11 +16,7 @@ dynamic _jsonSafe(Object? v) {
   if (v is Uint8List) return base64Encode(v);
   if (v is Blob) {
     final b = v.toBytes();
-    try {
-      return utf8.decode(b);
-    } catch (_) {
-      return base64Encode(b);
-    }
+    try { return utf8.decode(b); } catch (_) { return base64Encode(b); }
   }
   return v;
 }
@@ -33,10 +29,6 @@ bool _toBool(dynamic v) {
 }
 
 /// ========== GET /productos ==========
-/// Lista todos los productos.
-/// - Por defecto: ARRAY en español.
-/// - ?wrap=1 => { ok, count, data }
-/// - ?shape=front => llaves en inglés (name, price, image, ...)
 Future<Response> productosHandler(Request req) async {
   try {
     final qp = req.url.queryParameters;
@@ -45,52 +37,46 @@ Future<Response> productosHandler(Request req) async {
 
     final rs = await dbQuery('''
       SELECT
-        p.id_producto                AS id,
+        p.id_producto               AS id,
         p.id_vendedor,
         p.nombre,
-        CAST(p.descripcion AS CHAR)  AS descripcion,
+        CAST(p.descripcion AS CHAR) AS descripcion,
         p.precio,
         p.estado,
         p.envio_rapido,
         p.codigo_categoria,
         p.stock,
-        -- primera imagen
         (
-          SELECT CAST(fp.url AS CHAR)
+          SELECT CAST(fp.url_imagen AS CHAR)
           FROM fotos_producto fp
           WHERE fp.id_producto = p.id_producto
-          ORDER BY fp.id_foto ASC
           LIMIT 1
         ) AS imagen,
-        -- datos de categoría (opcional para shape=front)
-        CAST(c.slug AS CHAR)         AS cat_slug,
-        c.nombre                     AS cat_nombre
+        CAST(c.slug AS CHAR)        AS cat_slug,
+        c.nombre                    AS cat_nombre
       FROM productos p
       LEFT JOIN categorias c ON c.codigo_categoria = p.codigo_categoria
       ORDER BY p.id_producto DESC
     ''');
 
-    final listEs = rs.map<Map<String, dynamic>>((r) {
-      return {
-        'id'              : _jsonSafe(r['id']),
-        'id_vendedor'     : _jsonSafe(r['id_vendedor']),
-        'nombre'          : _jsonSafe(r['nombre']),
-        'descripcion'     : _jsonSafe(r['descripcion']),
-        'precio'          : (r['precio'] as num?)?.toDouble() ?? 0.0,
-        'estado'          : _jsonSafe(r['estado']),
-        'envio_rapido'    : _toBool(r['envio_rapido']),
-        'codigo_categoria': _jsonSafe(r['codigo_categoria']),
-        'stock'           : (r['stock'] as num?)?.toInt() ?? 0,
-        'imagen'          : _jsonSafe(r['imagen']),
-        'categoria'       : {
-          'slug' : _jsonSafe(r['cat_slug']),
-          'nombre': _jsonSafe(r['cat_nombre']),
-        },
-      };
+    final listEs = rs.map<Map<String, dynamic>>((r) => {
+      'id'              : _jsonSafe(r['id']),
+      'id_vendedor'     : _jsonSafe(r['id_vendedor']),
+      'nombre'          : _jsonSafe(r['nombre']),
+      'descripcion'     : _jsonSafe(r['descripcion']),
+      'precio'          : (r['precio'] as num?)?.toDouble() ?? 0.0,
+      'estado'          : _jsonSafe(r['estado']),
+      'envio_rapido'    : _toBool(r['envio_rapido']),
+      'codigo_categoria': _jsonSafe(r['codigo_categoria']),
+      'stock'           : (r['stock'] as num?)?.toInt() ?? 0,
+      'imagen'          : _jsonSafe(r['imagen']),
+      'categoria'       : {
+        'slug'  : _jsonSafe(r['cat_slug']),
+        'nombre': _jsonSafe(r['cat_nombre']),
+      },
     }).toList();
 
     final bodyObj = shapeFront ? mapProductosFront(listEs) : listEs;
-
     final body = wrap
         ? jsonEncode({'ok': true, 'count': bodyObj.length, 'data': bodyObj})
         : jsonEncode(bodyObj);
@@ -105,80 +91,58 @@ Future<Response> productosHandler(Request req) async {
   }
 }
 
-/// ========== GET /productos/<slug> ==========
-/// Lista productos por categoría. <slug> puede ser el slug o el código de categoría.
-/// - Por defecto: ARRAY en español.
-/// - ?wrap=1 => { ok, count, data }
-/// - ?shape=front => llaves en inglés
+/// ========== GET /productos/<slug>  y  GET /<slug> ==========
 Future<Response> productosPorCategoriaHandler(Request req, String slug) async {
   try {
     final qp = req.url.queryParameters;
     final wrap = qp['wrap'] == '1';
     final shapeFront = qp['shape'] == 'front';
 
-    // 1) Resolver código de categoría a partir del slug (o aceptar directamente el código)
-    String? codigoCat;
-    final rsCat = await dbQuery(
-      'SELECT codigo_categoria FROM categorias WHERE slug = ? OR codigo_categoria = ? LIMIT 1',
-      [slug, slug],
-    );
-    if (rsCat.isNotEmpty) {
-      codigoCat = rsCat.first['codigo_categoria']?.toString();
-    }
-    if (codigoCat == null || codigoCat.isEmpty) {
-      // No existe la categoría
-      final empty = wrap ? {'ok': true, 'count': 0, 'data': <dynamic>[]} : <dynamic>[];
-      return Response.ok(jsonEncode(empty), headers: _jsonHeaders);
-    }
-
-    // 2) Traer productos de esa categoría
+    // UNA SOLA QUERY: resolvemos la categoría por slug o por código en el WHERE
     final rs = await dbQuery('''
       SELECT
-        p.id_producto                AS id,
+        p.id_producto               AS id,
         p.id_vendedor,
         p.nombre,
-        CAST(p.descripcion AS CHAR)  AS descripcion,
+        CAST(p.descripcion AS CHAR) AS descripcion,
         p.precio,
         p.estado,
         p.envio_rapido,
         p.codigo_categoria,
         p.stock,
         (
-          SELECT CAST(fp.url AS CHAR)
+          SELECT CAST(fp.url_imagen AS CHAR)
           FROM fotos_producto fp
           WHERE fp.id_producto = p.id_producto
-          ORDER BY fp.id_foto ASC
           LIMIT 1
         ) AS imagen,
-        CAST(c.slug AS CHAR)         AS cat_slug,
-        c.nombre                     AS cat_nombre
+        CAST(c.slug AS CHAR)        AS cat_slug,
+        c.nombre                    AS cat_nombre
       FROM productos p
       JOIN categorias c ON c.codigo_categoria = p.codigo_categoria
-      WHERE p.codigo_categoria = ?
+      WHERE c.slug = ? OR c.codigo_categoria = ?
       ORDER BY p.id_producto DESC
-    ''', [codigoCat]);
+    ''', [slug, slug]);
 
-    final listEs = rs.map<Map<String, dynamic>>((r) {
-      return {
-        'id'              : _jsonSafe(r['id']),
-        'id_vendedor'     : _jsonSafe(r['id_vendedor']),
-        'nombre'          : _jsonSafe(r['nombre']),
-        'descripcion'     : _jsonSafe(r['descripcion']),
-        'precio'          : (r['precio'] as num?)?.toDouble() ?? 0.0,
-        'estado'          : _jsonSafe(r['estado']),
-        'envio_rapido'    : _toBool(r['envio_rapido']),
-        'codigo_categoria': _jsonSafe(r['codigo_categoria']),
-        'stock'           : (r['stock'] as num?)?.toInt() ?? 0,
-        'imagen'          : _jsonSafe(r['imagen']),
-        'categoria'       : {
-          'slug' : _jsonSafe(r['cat_slug']),
-          'nombre': _jsonSafe(r['cat_nombre']),
-        },
-      };
+    final listEs = rs.map<Map<String, dynamic>>((r) => {
+      'id'              : _jsonSafe(r['id']),
+      'id_vendedor'     : _jsonSafe(r['id_vendedor']),
+      'nombre'          : _jsonSafe(r['nombre']),
+      'descripcion'     : _jsonSafe(r['descripcion']),
+      'precio'          : (r['precio'] as num?)?.toDouble() ?? 0.0,
+      'estado'          : _jsonSafe(r['estado']),
+      'envio_rapido'    : _toBool(r['envio_rapido']),
+      'codigo_categoria': _jsonSafe(r['codigo_categoria']),
+      'stock'           : (r['stock'] as num?)?.toInt() ?? 0,
+      'imagen'          : _jsonSafe(r['imagen']),
+      'categoria'       : {
+        'slug'  : _jsonSafe(r['cat_slug']),
+        'nombre': _jsonSafe(r['cat_nombre']),
+      },
     }).toList();
 
+    // Si no hay productos, devolvemos arreglo vacío (o {ok,data:[]} si wrap=1)
     final bodyObj = shapeFront ? mapProductosFront(listEs) : listEs;
-
     final body = wrap
         ? jsonEncode({'ok': true, 'count': bodyObj.length, 'data': bodyObj})
         : jsonEncode(bodyObj);
@@ -193,9 +157,7 @@ Future<Response> productosPorCategoriaHandler(Request req, String slug) async {
   }
 }
 
-/// ========== POST /productos  ó  POST /productos/ ==========
-/// Crea producto. Soporta payload en español (nombre, descripcion, ...) y en inglés (name, description, ...).
-/// Devuelve el objeto creado; ?shape=front para llaves en inglés.
+/// ========== POST /productos ==========
 Future<Response> crearProductoHandler(Request req) async {
   try {
     final qp = req.url.queryParameters;
@@ -203,7 +165,6 @@ Future<Response> crearProductoHandler(Request req) async {
 
     final j = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
 
-    // admitir ambos nombres de campos (ES / EN)
     final idVendedor = (j['id_vendedor'] ?? j['sellerId'] ?? '').toString().trim();
     final nombre     = (j['nombre'] ?? j['name'] ?? '').toString().trim();
     final desc       = (j['descripcion'] ?? j['description'] ?? '').toString();
@@ -213,12 +174,16 @@ Future<Response> crearProductoHandler(Request req) async {
                        '${j['envio_rapido']}'.toLowerCase()=='true') ? 1 : 0;
     final codCat     = (j['codigo_categoria'] ?? j['categoryId'] ?? '').toString().trim();
     final stock      = int.tryParse('${j['stock'] ?? j['quantity']}');
+    final imagen     = (j['imagen'] ?? j['image'])?.toString().trim();
 
     const ESTADOS = {'Disponible','Agotado','En Oferta'};
 
-    if (idVendedor.isEmpty || nombre.isEmpty || precio == null || !ESTADOS.contains(estado) || codCat.isEmpty || stock == null) {
+    if (idVendedor.isEmpty || nombre.isEmpty || precio == null ||
+        !ESTADOS.contains(estado) || codCat.isEmpty || stock == null) {
       return Response(400,
-        body: jsonEncode({'error':'Requeridos: id_vendedor, nombre, precio(num), estado(Disponible|Agotado|En Oferta), codigo_categoria, stock(int)'}),
+        body: jsonEncode({'error':
+          'Requeridos: id_vendedor, nombre, precio(num), estado(Disponible|Agotado|En Oferta), codigo_categoria, stock(int)'
+        }),
         headers: _jsonHeaders);
     }
 
@@ -230,8 +195,14 @@ Future<Response> crearProductoHandler(Request req) async {
       ''',
       [idVendedor, nombre, desc, precio, estado, envioRap, codCat, stock],
     );
-
     final newId = res.insertId;
+
+    if (imagen != null && imagen.isNotEmpty) {
+      await dbQuery(
+        'INSERT INTO fotos_producto (id_producto, url_imagen) VALUES (?, ?)',
+        [newId, imagen],
+      );
+    }
 
     final createdEs = {
       'id'              : newId,
@@ -243,7 +214,7 @@ Future<Response> crearProductoHandler(Request req) async {
       'envio_rapido'    : envioRap == 1,
       'codigo_categoria': codCat,
       'stock'           : stock,
-      'imagen'          : null,
+      'imagen'          : imagen,
     };
 
     final bodyObj = shapeFront ? mapProductoFront(createdEs) : createdEs;
@@ -273,8 +244,7 @@ Future<Response> eliminarProductoHandler(Request req, String id) async {
         body: jsonEncode({'error':'No existe el producto $idNum'}),
         headers: _jsonHeaders);
     }
-    return Response.ok(jsonEncode({'ok': true, 'deleted': idNum}),
-      headers: _jsonHeaders);
+    return Response.ok(jsonEncode({'ok': true, 'deleted': idNum}), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error DELETE /productos/$id: $e\n$st');
     return Response.internalServerError(
@@ -343,7 +313,7 @@ document.querySelector('#crear').onclick=async()=>{
     categoryId:document.querySelector('#codigo_categoria').value,
     quantity:document.querySelector('#stock').value,
   };
-  const r=await fetch('/productos?shape=front',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const r=await fetch('/productos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(r.ok){
     document.querySelectorAll('input').forEach(i=>{if(i.type!=='checkbox')i.value=''; else i.checked=false;});
     cargar();
