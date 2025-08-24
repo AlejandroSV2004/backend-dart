@@ -1,4 +1,3 @@
-// bin/backend_dart.dart
 import 'dart:io';
 import 'package:dotenv/dotenv.dart';
 import 'package:shelf/shelf.dart';
@@ -18,7 +17,6 @@ import 'package:backend_dart/routes/usuarios.dart' show usuariosRouter;
 import 'package:backend_dart/routes/productos_vendedor.dart'
     show productosVendedorRouter;
 
-// ====== CORS ======
 const _corsHeaders = <String, String>{
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
@@ -43,16 +41,19 @@ Middleware _cors() {
 Response _redir308(String to) => Response(308, headers: {'Location': to});
 
 void main(List<String> args) async {
-  // 1) .env
+
   final env = DotEnv()..load();
-  final port = int.tryParse(env['PORT'] ?? '') ?? 3001;
+  // reemplaza la línea del puerto por esta:
+  final port = int.tryParse(Platform.environment['PORT'] ?? '') ??
+              int.tryParse((DotEnv()..load())['PORT'] ?? '') ??
+              3001;
 
-  // 2) DB (¡¡clave para evitar el error!!):
-  // tu initDb() debería leer DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME del .env
+
+
   await initDb();
-  print('✓ DB inicializada');
+  print('DB inicializada');
 
-  // 3) Router principal
+  // Router principal
   final router = Router();
 
   // Raíz
@@ -61,16 +62,15 @@ void main(List<String> args) async {
         headers: {'Content-Type': 'text/plain; charset=utf-8'});
   });
 
-  // /uploads solo si existe carpeta
   final uploadsDir = env['UPLOADS_DIR'] ?? 'uploads';
   final dir = Directory(uploadsDir);
   if (dir.existsSync()) {
     final uploadsHandler =
         createStaticHandler(uploadsDir, listDirectories: false);
     router.mount('/uploads/', uploadsHandler);
-    print('✓ /uploads servido desde "$uploadsDir"');
+    print('/uploads servido desde "$uploadsDir"');
   } else {
-    print('⚠️ Carpeta "$uploadsDir" no encontrada; /uploads deshabilitado');
+    print('Carpeta "$uploadsDir" no encontrada; /uploads deshabilitado');
   }
 
   // Redirecciones para aceptar sin barra final

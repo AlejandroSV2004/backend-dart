@@ -1,4 +1,3 @@
-// lib/db.dart
 import 'dart:async';
 import 'dart:io';
 import 'package:mysql1/mysql1.dart';
@@ -9,7 +8,6 @@ late ConnectionSettings _settings;
 MySqlConnection? _conn;
 bool _initialized = false;
 
-/// Inicializa la DB. Si no pasas `env`, carga .env automáticamente.
 Future<void> initDb({DotEnv? env}) async {
   _env = env ?? (DotEnv()..load());
 
@@ -27,23 +25,17 @@ Future<void> initDb({DotEnv? env}) async {
     db: db,
   );
   _initialized = true;
-
-  // Log simple (sin password)
-  // ignore: avoid_print
   print('DB => $user@$host:$port/$db');
 
-  // Conectar una vez para fallar rápido si algo está mal.
   await _ensureConn();
 
   _setupSignalHandlers();
 }
 
 void _setupSignalHandlers() {
-  // Cierre ordenado en Ctrl+C (SIGINT)
   ProcessSignal.sigint.watch().listen((_) async {
     await closeDb();
   });
-  // SIGTERM no existe en Windows
   if (!Platform.isWindows) {
     ProcessSignal.sigterm.watch().listen((_) async {
       await closeDb();
@@ -68,13 +60,11 @@ Future<MySqlConnection> _ensureConn() async {
   return _conn!;
 }
 
-/// Ejecuta una consulta y retorna `Results`.
 Future<Results> dbQuery(String sql, [List<Object?> params = const []]) async {
   final conn = await _ensureConn();
   return conn.query(sql, params);
 }
 
-/// Ejecuta y devuelve una lista de Map<String,dynamic>.
 Future<List<Map<String, dynamic>>> dbQueryMaps(
   String sql, [
   List<Object?> params = const [],
@@ -82,9 +72,7 @@ Future<List<Map<String, dynamic>>> dbQueryMaps(
   final rs = await dbQuery(sql, params);
   final out = <Map<String, dynamic>>[];
 
-  // IMPORTANTE: Field.name es String?; usamos índice para leer valores,
-  // y si el nombre es null, generamos uno de respaldo.
-  final fields = rs.fields; // List<Field>
+  final fields = rs.fields;
   for (final row in rs) {
     final m = <String, dynamic>{};
     for (var i = 0; i < fields.length; i++) {
@@ -96,7 +84,6 @@ Future<List<Map<String, dynamic>>> dbQueryMaps(
   return out;
 }
 
-/// Igual que arriba pero devuelve solo la primera fila (o null).
 Future<Map<String, dynamic>?> dbQueryOneMap(
   String sql, [
   List<Object?> params = const [],
@@ -105,7 +92,6 @@ Future<Map<String, dynamic>?> dbQueryOneMap(
   return list.isEmpty ? null : list.first;
 }
 
-/// Verifica si la DB responde.
 Future<bool> dbAlive() async {
   try {
     final r = await dbQuery('SELECT 1');
@@ -115,9 +101,7 @@ Future<bool> dbAlive() async {
   }
 }
 
-/// Cierra la conexión al apagar el servidor.
 Future<void> closeDb() async {
   try { await _conn?.close(); } catch (_) {}
   _conn = null;
 }
-  
