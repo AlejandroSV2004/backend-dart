@@ -1,3 +1,4 @@
+// bin/backend_dart.dart
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,12 +10,13 @@ import 'package:dotenv/dotenv.dart';
 import 'package:backend_dart/db.dart';
 
 // Rutas
+import 'package:backend_dart/routes/shape.dart';                // utilidades de mapeo (asegura import)
 import 'package:backend_dart/routes/categorias.dart';
-import 'package:backend_dart/routes/usuarios.dart';          // incluye loginUsuarioHandler
-import 'package:backend_dart/routes/productos.dart';        // incluye productosPorCategoriaHandler
+import 'package:backend_dart/routes/usuarios.dart';
+import 'package:backend_dart/routes/productos.dart';
+import 'package:backend_dart/routes/producto.dart';
 import 'package:backend_dart/routes/resenas.dart';
 import 'package:backend_dart/routes/carrito.dart';
-import 'package:backend_dart/routes/producto.dart';
 import 'package:backend_dart/routes/productos_vendedor.dart';
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
@@ -31,25 +33,21 @@ Future<void> main() async {
     ..get('/categorias', categoriasHandler)
 
     // ---------- Productos (grupo) ----------
-    // Canonicaliza /productos -> /productos/
+    // GET plano redirige a canónica (solo GET, no POST)
     ..get('/productos', (req) => Response.found('/productos/'))
+    // Aceptar POST sin slash final para evitar 404
+    ..post('/productos', crearProductoHandler)
     ..mount(
       '/productos/',
       Router()
-        // Lista completa
-        ..get('/', productosHandler)
-        // Crear
-        ..post('/', crearProductoHandler)
-        // Página admin (defínela ANTES que la dinámica)
-        ..get('/admin', adminProductosPageHandler)
-        // Productos por categoría (slug o código)
-        ..get('/<slug>', productosPorCategoriaHandler)
-        // Eliminar por id (DELETE)
-        ..delete('/<id>', eliminarProductoHandler),
+        ..get('/', productosHandler)                 // lista completa
+        ..post('/', crearProductoHandler)            // crear
+        ..get('/admin', adminProductosPageHandler)   // demo admin
+        ..get('/<slug>', productosPorCategoriaHandler) // productos por categoría (slug o código)
+        ..delete('/<id>', eliminarProductoHandler),  // eliminar
     )
 
     // ---------- Usuarios ----------
-    // Login PRIMERO para evitar choques con patrones dinámicos
     ..post('/usuarios/login', loginUsuarioHandler)
     ..get('/usuarios', usuariosHandler)
     ..post('/usuarios', crearUsuarioHandler)
@@ -90,7 +88,7 @@ Future<void> main() async {
       Router()..get('/<vendedorId>', productosDeVendedorHandler),
     )
 
-    // ---------- Preflight CORS ----------
+    // ---------- Preflight CORS (explícito) ----------
     ..options('/<ignored|.*>', _optionsHandler);
 
   // Pipeline + CORS
@@ -99,7 +97,7 @@ Future<void> main() async {
       .addMiddleware(_corsMiddleware)
       .addHandler(router);
 
-  // Envolver para devolver 404 en JSON (evita "Route not found" texto plano)
+  // Envolver para devolver 404 en JSON (evita texto plano de shelf_router)
   Future<Response> app(Request req) async {
     final res = await handler(req);
     if (res.statusCode == 404) {

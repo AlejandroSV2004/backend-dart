@@ -1,8 +1,10 @@
+// lib/routes/usuarios.dart
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
 import 'package:mysql1/mysql1.dart' show Blob, MySqlException;
+import 'package:backend_dart/routes/shape.dart' show mapUserFront;
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
@@ -13,7 +15,11 @@ dynamic _jsonSafe(Object? v) {
   if (v is Uint8List) return base64Encode(v);
   if (v is Blob) {
     final b = v.toBytes();
-    try { return utf8.decode(b); } catch (_) { return base64Encode(b); }
+    try {
+      return utf8.decode(b);
+    } catch (_) {
+      return base64Encode(b);
+    }
   }
   return v;
 }
@@ -27,23 +33,24 @@ bool _toBool(dynamic v) {
 
 /// ---------- POST /usuarios/login ----------
 /// body: { correo, contrasena }
-/// 200 => { id, correo, nombre_usuario, foto_perfil, es_negocio }
-/// 401 => { error: 'Credenciales inválidas' }
+/// ?shape=front para llaves en inglés
 Future<Response> loginUsuarioHandler(Request req) async {
   try {
+    final qp = req.url.queryParameters;
+    final shapeFront = qp['shape'] == 'front';
+
     final bodyStr = await req.readAsString();
     final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
 
     final correo = (j['correo'] ?? '').toString().trim();
-    final pass   = (j['contrasena'] ?? '').toString();
+    final pass = (j['contrasena'] ?? '').toString();
 
     if (correo.isEmpty || pass.isEmpty) {
       return Response(400,
-        body: jsonEncode({'error':'Faltan correo y/o contrasena'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Faltan correo y/o contrasena'}), headers: _jsonHeaders);
     }
 
-    // DEMO: contrasena en texto plano. En producción usa hash (bcrypt/argon2) y comparación segura.
+    // NOTA: En producción usar hash (bcrypt/argon2) y comparación segura
     final rs = await dbQuery('''
       SELECT
         id_usuario      AS id,
@@ -58,36 +65,40 @@ Future<Response> loginUsuarioHandler(Request req) async {
 
     if (rs.isEmpty) {
       return Response(401,
-        body: jsonEncode({'error':'Credenciales inválidas'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Credenciales inválidas'}), headers: _jsonHeaders);
     }
 
-    final u = rs.first;
-    final user = {
-      'id'            : _jsonSafe(u['id']),
-      'correo'        : _jsonSafe(u['correo']),
-      'nombre_usuario': _jsonSafe(u['nombre_usuario']),
-      'foto_perfil'   : _jsonSafe(u['foto_perfil']),
-      'es_negocio'    : _toBool(u['es_negocio']),
+    // ResultRow -> construimos un Map explícitamente
+    final row = rs.first;
+    final u = <String, dynamic>{
+      'id': _jsonSafe(row['id']),
+      'correo': _jsonSafe(row['correo']),
+      'nombre_usuario': _jsonSafe(row['nombre_usuario']),
+      'foto_perfil': _jsonSafe(row['foto_perfil']),
+      'es_negocio': _toBool(row['es_negocio']),
     };
 
-    // Si quieres token de demo:
-    // final token = base64Url.encode(utf8.encode('${user['id']}:${DateTime.now().millisecondsSinceEpoch}'));
-    // return Response.ok(jsonEncode({'ok': true, 'user': user, 'token': token}), headers: _jsonHeaders);
+    final user = shapeFront
+        ? mapUserFront(u)
+        : u;
 
     return Response.ok(jsonEncode({'ok': true, 'user': user}), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error POST /usuarios/login: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: _jsonHeaders);
+        body: jsonEncode({'error': 'Error interno del servidor'}), headers: _jsonHeaders);
   }
 }
 
 /// ---------- GET /usuarios ----------
-/// Por defecto: ARRAY plano. Compat: ?wrap=1 => { ok, count, data }
+/// Por defecto: ARRAY plano. ?wrap=1 => { ok, count, data }
+/// ?shape=front => llaves en inglés (id,email,name,avatar,isBusiness)
 Future<Response> usuariosHandler(Request req) async {
   try {
+    final qp = req.url.queryParameters;
+    final wrap = qp['wrap'] == '1';
+    final shapeFront = qp['shape'] == 'front';
+
     final rs = await dbQuery('''
       SELECT
         id_usuario      AS id,
@@ -99,48 +110,54 @@ Future<Response> usuariosHandler(Request req) async {
       ORDER BY nombre_usuario
     ''');
 
-    final data = rs.map((r) => {
-      'id'            : _jsonSafe(r['id']),
-      'correo'        : _jsonSafe(r['correo']),
-      'nombre_usuario': _jsonSafe(r['nombre_usuario']),
-      'foto_perfil'   : _jsonSafe(r['foto_perfil']),
-      'es_negocio'    : _toBool(r['es_negocio']),
+    final list = rs.map<Map<String, dynamic>>((r) {
+      final base = {
+        'id': _jsonSafe(r['id']),
+        'correo': _jsonSafe(r['correo']),
+        'nombre_usuario': _jsonSafe(r['nombre_usuario']),
+        'foto_perfil': _jsonSafe(r['foto_perfil']),
+        'es_negocio': _toBool(r['es_negocio']),
+      };
+      return shapeFront ? mapUserFront(base) : base;
     }).toList();
 
-    final wrap = req.url.queryParameters['wrap'] == '1';
     final body = wrap
-      ? jsonEncode({'ok': true, 'count': data.length, 'data': data})
-      : jsonEncode(data);
+        ? jsonEncode({'ok': true, 'count': list.length, 'data': list})
+        : jsonEncode(list);
 
     return Response.ok(body, headers: _jsonHeaders);
   } catch (e, st) {
     print('Error GET /usuarios: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error': 'Error interno del servidor'}),
-      headers: _jsonHeaders,
-    );
+        body: jsonEncode({'error': 'Error interno del servidor'}), headers: _jsonHeaders);
   }
 }
 
 /// ---------- POST /usuarios ----------
 /// body: { id, correo, nombre_usuario, foto_perfil?, contrasena?, es_negocio? }
-/// Devuelve OBJETO creado. Compat: ?wrap=1 => { ok, data }
+/// Devuelve OBJETO creado. ?shape=front => llaves en inglés
 Future<Response> crearUsuarioHandler(Request req) async {
   try {
+    final qp = req.url.queryParameters;
+    final shapeFront = qp['shape'] == 'front';
+
     final bodyStr = await req.readAsString();
     final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
 
-    final id     = (j['id'] ?? j['id_usuario'] ?? '').toString().trim();
+    final id = (j['id'] ?? j['id_usuario'] ?? '').toString().trim();
     final correo = (j['correo'] ?? '').toString().trim();
     final nombre = (j['nombre_usuario'] ?? '').toString().trim();
-    final foto   = (j['foto_perfil'] ?? '').toString().trim();
-    final pass   = (j['contrasena'] ?? '').toString(); // DEMO
-    final esNeg  = (j['es_negocio'] == true || j['es_negocio'] == 1 || '${j['es_negocio']}'.toLowerCase()=='true') ? 1 : 0;
+    final foto = (j['foto_perfil'] ?? '').toString().trim();
+    final pass = (j['contrasena'] ?? '').toString(); // DEMO
+    final esNeg =
+        (j['es_negocio'] == true || j['es_negocio'] == 1 || '${j['es_negocio']}'.toLowerCase() == 'true')
+            ? 1
+            : 0;
 
     if (id.isEmpty || correo.isEmpty || nombre.isEmpty) {
       return Response(400,
-        body: jsonEncode({'error':'Campos requeridos: id, correo, nombre_usuario'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Campos requeridos: id, correo, nombre_usuario'}),
+          headers: _jsonHeaders);
     }
 
     try {
@@ -151,31 +168,26 @@ Future<Response> crearUsuarioHandler(Request req) async {
     } on MySqlException catch (e) {
       if (e.errorNumber == 1062) {
         return Response(409,
-          body: jsonEncode({'error':'Usuario ya existe (id o correo duplicado)'}),
-          headers: _jsonHeaders);
+            body: jsonEncode({'error': 'Usuario ya existe (id o correo duplicado)'}),
+            headers: _jsonHeaders);
       }
       rethrow;
     }
 
-    final created = {
-      'id'            : id,
-      'correo'        : correo,
+    final createdBase = {
+      'id': id,
+      'correo': correo,
       'nombre_usuario': nombre,
-      'foto_perfil'   : foto.isEmpty ? null : foto,
-      'es_negocio'    : esNeg == 1,
+      'foto_perfil': foto.isEmpty ? null : foto,
+      'es_negocio': esNeg == 1,
     };
+    final created = shapeFront ? mapUserFront(createdBase) : createdBase;
 
-    final wrap = req.url.queryParameters['wrap'] == '1';
-    final body = wrap
-      ? jsonEncode({'ok': true, 'data': created})
-      : jsonEncode(created);
-
-    return Response(201, body: body, headers: _jsonHeaders);
+    return Response(201, body: jsonEncode(created), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error POST /usuarios: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: _jsonHeaders);
+        body: jsonEncode({'error': 'Error interno del servidor'}), headers: _jsonHeaders);
   }
 }
 
@@ -186,15 +198,13 @@ Future<Response> eliminarUsuarioHandler(Request req, String id) async {
     final n = r.affectedRows ?? 0;
     if (n == 0) {
       return Response(404,
-        body: jsonEncode({'error':'No existe el usuario $id'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'No existe el usuario $id'}), headers: _jsonHeaders);
     }
     return Response.ok(jsonEncode({'ok': true, 'deleted': id}), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error DELETE /usuarios/$id: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: _jsonHeaders);
+        body: jsonEncode({'error': 'Error interno del servidor'}), headers: _jsonHeaders);
   }
 }
 
@@ -245,9 +255,9 @@ async function cargar(){
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${u.id}</td>
-      <td>${u.correo||''}</td>
-      <td>${u.nombre_usuario||''}</td>
-      <td>${u.es_negocio? 'Sí':'No'}</td>
+      <td>${u.correo||u.email||''}</td>
+      <td>${u.nombre_usuario||u.name||''}</td>
+      <td>${(u.es_negocio ?? u.isBusiness) ? 'Sí':'No'}</td>
       <td><button data-id="${u.id}" class="del">Eliminar</button></td>`;
     tbody.appendChild(tr);
   });
@@ -290,5 +300,5 @@ cargar();
 </script>
 </html>
 ''';
-  return Response.ok(html, headers: {'Content-Type':'text/html; charset=utf-8'});
+  return Response.ok(html, headers: {'Content-Type': 'text/html; charset=utf-8'});
 }

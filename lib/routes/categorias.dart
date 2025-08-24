@@ -1,8 +1,10 @@
+// lib/routes/categorias.dart
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
 import 'package:mysql1/mysql1.dart' show Blob;
+import 'package:backend_dart/routes/shape.dart' show mapCategoriasFront;
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
@@ -12,55 +14,71 @@ dynamic _jsonSafe(Object? v) {
   if (v is BigInt) return v.toString();
   if (v is Uint8List) return base64Encode(v);
   if (v is Blob) {
-    final bytes = v.toBytes();
+    final b = v.toBytes();
     try {
-      return utf8.decode(bytes);
+      return utf8.decode(b);
     } catch (_) {
-      return base64Encode(bytes);
+      return base64Encode(b);
     }
   }
   return v;
 }
 
 /// GET /categorias
-/// - Por defecto: ARRAY plano de categorías
-/// - Compatibilidad: agrega ?wrap=1 para { ok, count, data }
-Future<Response> categoriasHandler(Request req) async {
+/// - Por defecto: ARRAY plano con llaves en español.
+/// - ?wrap=1 => { ok, count, data }
+/// - ?shape=front => llaves en inglés (id,name,description,slug,icon,color,count)
+Future<Response> categoriasHandler(Request request) async {
   try {
+    final qp = request.url.queryParameters;
+    final wrap = qp['wrap'] == '1';
+    final shapeFront = qp['shape'] == 'front';
+
+    // Traer categorías + conteo de productos por categoría (si existe la tabla productos)
     final results = await dbQuery('''
-      SELECT 
-        CAST(codigo_categoria AS CHAR) AS codigo_categoria,
-        nombre,
-        CAST(descripcion AS CHAR) AS descripcion,
-        CAST(slug AS CHAR) AS slug
-      FROM categorias
-      ORDER BY nombre
+      SELECT
+        c.codigo_categoria                         AS id,
+        c.nombre                                   AS nombre,
+        CAST(c.descripcion AS CHAR)                AS descripcion,
+        CAST(c.slug        AS CHAR)                AS slug,
+        COALESCE(pc.cnt, 0)                        AS cantidad_num
+      FROM categorias c
+      LEFT JOIN (
+        SELECT codigo_categoria, COUNT(*) AS cnt
+        FROM productos
+        GROUP BY codigo_categoria
+      ) pc ON pc.codigo_categoria = c.codigo_categoria
+      ORDER BY c.nombre
     ''');
 
-    // Fallbacks estéticos si no tienes icono/color en DB
+    // Iconos / colores por defecto (cíclicos)
     final icons  = ['Battery', 'Zap', 'Sun', 'Settings', 'Home', 'Grid3X3', 'Smartphone'];
     final colors = ['blue', 'yellow', 'green', 'red', 'purple', 'indigo', 'teal'];
 
     final rows = results.toList();
-    final data = <Map<String, dynamic>>[];
+    final dataEs = <Map<String, dynamic>>[];
 
     for (var i = 0; i < rows.length; i++) {
       final r = rows[i];
-      data.add({
-        'codigo_categoria': _jsonSafe(r['codigo_categoria']),
-        'nombre'          : _jsonSafe(r['nombre']),
-        'descripcion'     : _jsonSafe(r['descripcion']),
-        'slug'            : _jsonSafe(r['slug']),
-        'icono'           : icons[i % icons.length],
-        'color'           : colors[i % colors.length],
-        'cantidad'        : '${(100 + i * 37) % 1000}+ productos',
+      final cnt = (r['cantidad_num'] as num?)?.toInt() ?? 0;
+
+      dataEs.add({
+        'id'         : _jsonSafe(r['id']),
+        'nombre'     : _jsonSafe(r['nombre']),
+        'descripcion': _jsonSafe(r['descripcion']),
+        'slug'       : _jsonSafe(r['slug']),
+        'icono'      : icons[i % icons.length],
+        'color'      : colors[i % colors.length],
+        'cantidad'   : '$cnt+ productos',
       });
     }
 
-    final wrap = req.url.queryParameters['wrap'] == '1';
+    // <-- aquí estaba el error: usar la función que mapea la LISTA completa
+    final bodyObj = shapeFront ? mapCategoriasFront(dataEs) : dataEs;
+
     final body = wrap
-        ? jsonEncode({'ok': true, 'count': data.length, 'data': data})
-        : jsonEncode(data);
+        ? jsonEncode({'ok': true, 'count': bodyObj.length, 'data': bodyObj})
+        : jsonEncode(bodyObj);
 
     return Response.ok(body, headers: _jsonHeaders);
   } catch (e, st) {

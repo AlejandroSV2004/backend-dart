@@ -1,6 +1,10 @@
+// lib/routes/producto.dart
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
+import 'package:mysql1/mysql1.dart' show Blob;
+import 'package:backend_dart/routes/shape.dart' show mapProductoFront;
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
@@ -8,81 +12,90 @@ dynamic _jsonSafe(Object? v) {
   if (v == null) return null;
   if (v is DateTime) return v.toIso8601String();
   if (v is BigInt) return v.toString();
+  if (v is Uint8List) return base64Encode(v);
+  if (v is Blob) {
+    final b = v.toBytes();
+    try {
+      return utf8.decode(b);
+    } catch (_) {
+      return base64Encode(b);
+    }
+  }
   return v;
 }
 
-Future<Map<String, dynamic>?> _fetchProducto(String id) async {
-  final rs = await dbQuery('''
-    SELECT 
-      p.id_producto                 AS id,
-      p.nombre                      AS nombre,
-      CAST(p.descripcion AS CHAR)   AS descripcion,
-      p.precio                      AS precio,
-      p.estado                      AS estado,
-      p.envio_rapido                AS envio_rapido,
-      p.codigo_categoria            AS codigo_categoria,
-      p.stock                       AS stock,
-      u.id_usuario                  AS vendedor_id,
-      u.nombre_usuario              AS vendedor_nombre
-    FROM productos p
-    LEFT JOIN usuarios u ON u.id_usuario = p.id_vendedor
-    WHERE p.id_producto = ?
-    LIMIT 1
-  ''', [id]);
-
-  if (rs.isEmpty) return null;
-
-  final base = rs.first;
-
-  final fotos = await dbQuery('''
-    SELECT CAST(url AS CHAR) AS url
-    FROM fotos_producto
-    WHERE id_producto = ?
-    ORDER BY id_foto ASC
-  ''', [id]);
-
-  final precio = (base['precio'] as num?)?.toDouble() ?? 0.0;
-  final stock  = (base['stock']  as num?)?.toInt() ?? 0;
-  final envioRapidoRaw = base['envio_rapido'];
-  final envioRapido = (envioRapidoRaw is bool)
-      ? envioRapidoRaw
-      : ((envioRapidoRaw is num) ? envioRapidoRaw != 0 : false);
-
-  return {
-    'id'              : _jsonSafe(base['id']),
-    'nombre'          : _jsonSafe(base['nombre']),
-    'descripcion'     : _jsonSafe(base['descripcion']),
-    'precio'          : precio,
-    'estado'          : _jsonSafe(base['estado']),
-    'envio_rapido'    : envioRapido,
-    'codigo_categoria': _jsonSafe(base['codigo_categoria']),
-    'stock'           : stock,
-    'vendedor': {
-      'id'    : _jsonSafe(base['vendedor_id']),
-      'nombre': _jsonSafe(base['vendedor_nombre']),
-    },
-    'fotos': fotos.map((r) => _jsonSafe(r['url'])).toList(),
-  };
+bool _toBool(dynamic v) {
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) return v == '1' || v.toLowerCase() == 'true';
+  return false;
 }
 
-/// GET /producto/:id
-/// - Por defecto: OBJETO plano del producto
-/// - Compat: agrega ?wrap=1 para { ok, data }
+/// ---------- GET /producto/<id> ----------
+/// - Por defecto devuelve llaves en español.
+/// - ?shape=front => llaves en inglés (name, price, image, sellerId, sellerName, ...)
+/// - ?wrap=1 => { ok, data }
 Future<Response> productoGetHandler(Request req, String id) async {
   try {
-    final prod = await _fetchProducto(id);
-    if (prod == null) {
+    final qp = req.url.queryParameters;
+    final shapeFront = qp['shape'] == 'front';
+    final wrap = qp['wrap'] == '1';
+
+    final rs = await dbQuery('''
+      SELECT 
+        p.id_producto                 AS id,
+        p.nombre,
+        CAST(p.descripcion AS CHAR)   AS descripcion,
+        p.precio,
+        p.estado,
+        p.envio_rapido,
+        p.codigo_categoria,
+        p.stock,
+        u.id_usuario                  AS vendedor_id,
+        u.nombre_usuario              AS vendedor_nombre,
+        u.correo                      AS vendedor_correo
+      FROM productos p
+      LEFT JOIN usuarios u ON u.id_usuario = p.id_vendedor
+      WHERE p.id_producto = ?
+      LIMIT 1
+    ''', [id]);
+
+    if (rs.isEmpty) {
       return Response(404,
-        body: jsonEncode({'error': 'Producto no encontrado'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Producto no encontrado'}),
+          headers: _jsonHeaders);
     }
 
-    final wrap = req.url.queryParameters['wrap'] == '1';
-    final body = wrap
-        ? jsonEncode({'ok': true, 'data': prod})
-        : jsonEncode(prod);
+    final base = rs.first;
 
-    return Response.ok(body, headers: _jsonHeaders);
+    final fotos = await dbQuery('''
+      SELECT CAST(url AS CHAR) AS url
+      FROM fotos_producto
+      WHERE id_producto = ?
+      ORDER BY id_foto ASC
+    ''', [id]);
+
+    final dataEs = {
+      'id'              : _jsonSafe(base['id']),
+      'nombre'          : _jsonSafe(base['nombre']),
+      'descripcion'     : _jsonSafe(base['descripcion']),
+      'precio'          : (base['precio'] as num?)?.toDouble() ?? 0.0,
+      'estado'          : _jsonSafe(base['estado']),
+      'envio_rapido'    : _toBool(base['envio_rapido']),
+      'codigo_categoria': _jsonSafe(base['codigo_categoria']),
+      'stock'           : (base['stock'] as num?)?.toInt() ?? 0,
+      'vendedor'        : {
+        'id'    : _jsonSafe(base['vendedor_id']),
+        'nombre': _jsonSafe(base['vendedor_nombre']),
+        'correo': _jsonSafe(base['vendedor_correo']),
+      },
+      'fotos'           : fotos.map((r) => _jsonSafe(r['url'])).toList(),
+    };
+
+    final bodyObj = shapeFront ? mapProductoFront(dataEs) : dataEs;
+    final body = wrap ? {'ok': true, 'data': bodyObj} : bodyObj;
+
+    return Response.ok(jsonEncode(body), headers: _jsonHeaders);
   } catch (e, st) {
     print('Error GET /producto/$id: $e\n$st');
     return Response.internalServerError(
@@ -92,50 +105,55 @@ Future<Response> productoGetHandler(Request req, String id) async {
   }
 }
 
-/// PUT /producto/:id
-/// body: { nombre?, descripcion?, stock? }
-/// - Devuelve el producto actualizado (mismo formato que GET)
+/// ---------- PUT /producto/<id> ----------
+/// Acepta campos en español o inglés:
+///  - nombre|name, descripcion|description, stock|quantity,
+///  - precio|price, estado|status, envio_rapido (bool|0/1|'true'/'false')
+/// Devuelve el producto actualizado (respeta ?shape=front y ?wrap=1).
 Future<Response> productoUpdateHandler(Request req, String id) async {
   try {
-    final bodyStr = await req.readAsString();
-    final body = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
+    final j = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
 
-    final allowed = <String, dynamic>{};
-    if (body.containsKey('nombre'))      allowed['nombre'] = body['nombre'];
-    if (body.containsKey('descripcion')) allowed['descripcion'] = body['descripcion'];
-    if (body.containsKey('stock'))       allowed['stock'] = body['stock'];
-
-    if (allowed.isEmpty) {
-      return Response(400,
-        body: jsonEncode({'error': 'No hay campos válidos para actualizar (nombre, descripcion, stock)'}),
-        headers: _jsonHeaders);
-    }
+    // normalización de nombres
+    final nombre       = j.containsKey('nombre')       ? j['nombre']       : j['name'];
+    final descripcion  = j.containsKey('descripcion')  ? j['descripcion']  : j['description'];
+    final stock        = j.containsKey('stock')        ? j['stock']        : j['quantity'];
+    final precio       = j.containsKey('precio')       ? j['precio']       : j['price'];
+    final estado       = j.containsKey('estado')       ? j['estado']       : j['status'];
+    final envioRap     = j['envio_rapido'];
 
     final sets = <String>[];
     final params = <dynamic>[];
-    allowed.forEach((k, v) {
-      sets.add('$k = ?');
-      params.add(v);
-    });
-    params.add(id);
 
-    await dbQuery('UPDATE productos SET ${sets.join(', ')} WHERE id_producto = ?', params);
-
-    // Respuesta uniforme al GET
-    final prod = await _fetchProducto(id);
-    if (prod == null) {
-      // improbable tras update, pero por si acaso
-      return Response(404,
-        body: jsonEncode({'error': 'Producto no encontrado tras actualizar'}),
-        headers: _jsonHeaders);
+    void add(String col, dynamic val) {
+      sets.add('$col = ?');
+      params.add(val);
     }
 
-    final wrap = req.url.queryParameters['wrap'] == '1';
-    final bodyOut = wrap
-        ? jsonEncode({'ok': true, 'data': prod})
-        : jsonEncode(prod);
+    if (nombre != null)      add('nombre', nombre);
+    if (descripcion != null) add('descripcion', descripcion);
+    if (stock != null)       add('stock', int.tryParse('$stock') ?? stock);
+    if (precio != null)      add('precio', num.tryParse('$precio') ?? precio);
+    if (estado != null)      add('estado', estado);
+    if (envioRap != null) {
+      final b = (envioRap == true || envioRap == 1 || '$envioRap'.toLowerCase() == 'true') ? 1 : 0;
+      add('envio_rapido', b);
+    }
 
-    return Response.ok(bodyOut, headers: _jsonHeaders);
+    if (sets.isEmpty) {
+      return Response(400,
+          body: jsonEncode({
+            'error':
+                'No hay campos válidos para actualizar (nombre|name, descripcion|description, stock|quantity, precio|price, estado|status, envio_rapido)'
+          }),
+          headers: _jsonHeaders);
+    }
+
+    params.add(id);
+    await dbQuery('UPDATE productos SET ${sets.join(', ')} WHERE id_producto = ?', params);
+
+    // Reutilizamos el GET para devolver con el mismo shape/wrap que pidió el cliente
+    return productoGetHandler(req, id);
   } catch (e, st) {
     print('Error PUT /producto/$id: $e\n$st');
     return Response.internalServerError(
