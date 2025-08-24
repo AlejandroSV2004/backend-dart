@@ -83,7 +83,7 @@ Future<Response> _putActualizarProducto(Request req, String idStr) async {
 
     final body =
         (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
-    final nombre      = body['nombre'];
+    final nombre      = body['nombre'] ?? body['name'];
     final descripcion = body['descripcion'];
     final stock       = body['stock'];
 
