@@ -8,14 +8,40 @@ late ConnectionSettings _settings;
 MySqlConnection? _conn;
 bool _initialized = false;
 
-Future<void> initDb({DotEnv? env}) async {
-  _env = env ?? (DotEnv()..load());
+String _getVar(String key, {String def = ''}) {
+  final v1 = _env?[key];
+  if (v1 != null && v1.isNotEmpty) return v1;
+  final v2 = Platform.environment[key];
+  if (v2 != null && v2.isNotEmpty) return v2;
+  return def;
+}
 
-  final host = _env!['DB_HOST'] ?? '127.0.0.1';
-  final port = int.tryParse(_env!['DB_PORT'] ?? '') ?? 3306;
-  final user = _env!['DB_USER'] ?? 'lumina_user';
-  final pass = _env!['DB_PASSWORD'] ?? _env!['DB_PASS'] ?? '';
-  final db   = _env!['DB_NAME'] ?? 'lumina_marketplace';
+int _getInt(String key, {required int def}) {
+  final s = _getVar(key);
+  final n = int.tryParse(s);
+  return n ?? def;
+}
+
+Future<void> initDb({DotEnv? env}) async {
+  try {
+    if (env != null) {
+      _env = env;
+    } else {
+      if (File('.env').existsSync()) {
+        _env = DotEnv()..load();
+      } else {
+        _env = DotEnv();
+      }
+    }
+  } catch (_) {
+    _env = DotEnv();
+  }
+
+  final host = _getVar('DB_HOST', def: '127.0.0.1');
+  final port = _getInt('DB_PORT', def: 3306);
+  final user = _getVar('DB_USER', def: 'lumina_user');
+  final pass = _getVar('DB_PASSWORD', def: _getVar('DB_PASS', def: ''));
+  final db   = _getVar('DB_NAME', def: 'lumina_marketplace');
 
   _settings = ConnectionSettings(
     host: host,
@@ -25,6 +51,7 @@ Future<void> initDb({DotEnv? env}) async {
     db: db,
   );
   _initialized = true;
+
   print('DB => $user@$host:$port/$db');
 
   await _ensureConn();
@@ -60,10 +87,12 @@ Future<MySqlConnection> _ensureConn() async {
   return _conn!;
 }
 
+
 Future<Results> dbQuery(String sql, [List<Object?> params = const []]) async {
   final conn = await _ensureConn();
   return conn.query(sql, params);
 }
+
 
 Future<List<Map<String, dynamic>>> dbQueryMaps(
   String sql, [
