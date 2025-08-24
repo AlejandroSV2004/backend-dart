@@ -1,24 +1,39 @@
-// lib/routes/usuarios.dart
+
+// Endpoints:
+//   GET    /api/usuarios
+//   POST   /api/usuarios/register        (multipart/form-data o JSON; campo archivo: "foto_perfil")
+//   POST   /api/usuarios/login           (JSON {correo, contrasena})
+//   GET    /api/usuarios/<id>            (alfa-num de 6 chars normalmente)
+//   PUT    /api/usuarios/<id>            (JSON {nombre_usuario?, localidad?, descripcion?})
+
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
+
+import 'package:backend_dart/db.dart' show dbQuery;
+import 'package:crypto/crypto.dart' show sha1;
+import 'package:dotenv/dotenv.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+import 'package:mime/mime.dart';
 import 'package:shelf/shelf.dart';
-import 'package:backend_dart/db.dart';
-import 'package:mysql1/mysql1.dart' show Blob, MySqlException;
-// mapUserFront ya no es necesario para login con shape Node, pero lo dejamos por compat (p.ej. GET /usuarios?shape=front)
-import 'package:backend_dart/routes/shape.dart' show mapUserFront;
+import 'package:shelf_router/shelf_router.dart';
 
-const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
+const _json = {'Content-Type': 'application/json; charset=utf-8'};
 
-dynamic _jsonSafe(Object? v) {
-  if (v == null) return null;
-  if (v is DateTime) return v.toIso8601String();
-  if (v is BigInt) return v.toString();
-  if (v is Uint8List) return base64Encode(v);
-  if (v is Blob) {
-    final b = v.toBytes();
-    try { return utf8.decode(b); } catch (_) { return base64Encode(b); }
+// ------------------------- Utilidades -------------------------
+
+final _rnd = Random.secure();
+
+Future<String> _generarIDUnico() async {
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  while (true) {
+    final id = List.generate(6, (_) => chars[_rnd.nextInt(chars.length)]).join();
+    final rs =
+        await dbQuery('SELECT id_usuario FROM usuarios WHERE id_usuario = ?', [id]);
+    if (rs.isEmpty) return id;
   }
-  return v;
 }
 
 bool _toBool(dynamic v) {
@@ -28,272 +43,345 @@ bool _toBool(dynamic v) {
   return false;
 }
 
-/// ---------- POST /usuarios/login ----------
-/// body: { correo, contrasena }
-/// RESPUESTA: { success: true, usuario: {...} }   (igual que Node)
-Future<Response> loginUsuarioHandler(Request req) async {
+String? _contentType(Request req) =>
+    req.headers['content-type'] ?? req.headers['Content-Type'];
+
+String _signParams(Map<String, String> params, String apiSecret) {
+  final keys = params.keys.toList()..sort();
+  final toSign = keys.map((k) => '$k=${params[k]}').join('&');
+  return sha1.convert(utf8.encode('$toSign$apiSecret')).toString();
+}
+
+/// Sube bytes a Cloudinary
+Future<String?> _uploadToCloudinary({
+  required Uint8List bytes,
+  required String filename,
+  String? mimeType,
+}) async {
+  final env = DotEnv()..load();
+  final cloud = env['CLOUD_NAME'] ?? env['CLOUDINARY_CLOUD_NAME'];
+  final apiKey = env['CLOUD_API_KEY'] ?? env['CLOUDINARY_API_KEY'];
+  final apiSecret = env['CLOUD_API_SECRET'] ?? env['CLOUDINARY_API_SECRET'];
+  final uploadPreset = env['CLOUD_UPLOAD_PRESET'];
+
+  if (cloud == null || apiKey == null || (uploadPreset == null && apiSecret == null)) {
+    print('⚠️ Cloudinary vars faltantes (CLOUD_NAME/CLOUD_API_KEY/[CLOUD_UPLOAD_PRESET|CLOUD_API_SECRET])');
+    return null;
+  }
+
+  final uri = Uri.parse('https://api.cloudinary.com/v1_1/$cloud/image/upload');
+  final req = http.MultipartRequest('POST', uri);
+
+  req.fields['folder'] = 'usuarios';
+  req.fields['transformation'] = 'c_limit,w_500,h_500';
+
+  if (uploadPreset != null && uploadPreset.isNotEmpty) {
+    // Unsigned upload (más simple)
+    req.fields['upload_preset'] = uploadPreset;
+  } else {
+    // Signed upload
+    final timestamp = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
+    final paramsToSign = <String, String>{
+      'folder': 'usuarios',
+      'transformation': 'c_limit,w_500,h_500',
+      'timestamp': timestamp,
+    };
+    final signature = _signParams(paramsToSign, apiSecret!);
+    req.fields.addAll({
+      'timestamp': timestamp,
+      'api_key': apiKey,
+      'signature': signature,
+    });
+  }
+
+  req.files.add(http.MultipartFile.fromBytes(
+    'file',
+    bytes,
+    filename: filename,
+    contentType: mimeType != null ? MediaType.parse(mimeType) : null,
+  ));
+
+  final resp = await req.send();
+  final body = await resp.stream.bytesToString();
+
+  if (resp.statusCode >= 200 && resp.statusCode < 300) {
+    final data = jsonDecode(body) as Map<String, dynamic>;
+    return (data['secure_url'] ?? data['url'])?.toString();
+  } else {
+    print('❌ Cloudinary ${resp.statusCode}: $body');
+    return null;
+  }
+}
+
+
+Future<({
+  Map<String, String> fields,
+  Uint8List? fileBytes,
+  String? fileName,
+  String? fileMime
+})> _parseRegisterBody(Request req) async {
+  final ctype = _contentType(req) ?? '';
+  if (!ctype.toLowerCase().startsWith('multipart/form-data')) {
+    final Map<String, dynamic> j =
+        (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
+    return (
+      fields: j.map((k, v) => MapEntry(k, v?.toString() ?? '')),
+      fileBytes: null,
+      fileName: null,
+      fileMime: null
+    );
+  }
+
+  final match = RegExp(r'boundary=([^\s;]+)').firstMatch(ctype);
+  if (match == null) {
+    return (fields: <String, String>{}, fileBytes: null, fileName: null, fileMime: null);
+  }
+  final boundary = match.group(1)!;
+
+  final transformer = MimeMultipartTransformer(boundary);
+  final parts = await transformer.bind(req.read()).toList();
+
+  final fields = <String, String>{};
+  Uint8List? fileBytes;
+  String? fileName;
+  String? fileMime;
+
+  for (final part in parts) {
+    final disp = part.headers['content-disposition'] ?? '';
+    final name = RegExp(r'name="([^"]+)"').firstMatch(disp)?.group(1);
+    final filename = RegExp(r'filename="([^"]*)"').firstMatch(disp)?.group(1);
+    final ct = part.headers['content-type'];
+
+    final collected = await part.fold<List<int>>([], (p, e) => (p..addAll(e)));
+    if (name == null) continue;
+
+    if (filename != null && filename.isNotEmpty) {
+      fileBytes = Uint8List.fromList(collected);
+      fileName = filename;
+      fileMime = ct ?? lookupMimeType(filename) ?? 'application/octet-stream';
+    } else {
+      fields[name] = utf8.decode(collected);
+    }
+  }
+
+  return (fields: fields, fileBytes: fileBytes, fileName: fileName, fileMime: fileMime);
+}
+
+// ------------------------- Handlers -------------------------
+
+// GET /api/usuarios
+Future<Response> _listarUsuarios(Request req) async {
   try {
-    final bodyStr = await req.readAsString();
-    final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
+    final rs = await dbQuery('SELECT * FROM usuarios');
 
-    final correo = (j['correo'] ?? '').toString().trim();
-    final pass   = (j['contrasena'] ?? '').toString();
-
-    if (correo.isEmpty || pass.isEmpty) {
-      return Response(400,
-        body: jsonEncode({'error': 'Faltan correo y/o contrasena'}),
-        headers: _jsonHeaders);
+    final list = <Map<String, dynamic>>[];
+    for (final row in rs) {
+      list.add({
+        'id_usuario': row['id_usuario']?.toString(),
+        'correo': row['correo']?.toString(),
+        'nombre_usuario': row['nombre_usuario']?.toString(),
+        'foto_perfil': row['foto_perfil']?.toString(),
+        'contrasena': row['contrasena']?.toString(),
+        'es_negocio': row['es_negocio'],
+      });
     }
 
-    // En producción: hashear y comparar de forma segura.
-    final rs = await dbQuery('''
-      SELECT
-        id_usuario      AS id_usuario,
-        correo,
-        nombre_usuario,
-        foto_perfil,
-        es_negocio
+    return Response.ok(jsonEncode(list), headers: _json);
+  } catch (e, st) {
+    print('❌ Error en /api/usuarios: $e\n$st');
+    return Response.internalServerError(
+      body: jsonEncode({'error': 'Error al obtener usuarios'}),
+      headers: _json,
+    );
+  }
+}
+
+// POST /api/usuarios/register
+Future<Response> _registrarUsuario(Request req) async {
+  try {
+    final parsed = await _parseRegisterBody(req);
+    final f = parsed.fields;
+
+    final correo = (f['correo'] ?? '').trim();
+    final nombreUsuario = (f['nombre_usuario'] ?? '').trim();
+    final contrasena = (f['contrasena'] ?? '').trim();
+    final esNegocioStr = (f['es_negocio'] ?? 'false').trim();
+    final esNegocio = _toBool(esNegocioStr) ? 1 : 0;
+
+    if (correo.isEmpty || nombreUsuario.isEmpty || contrasena.isEmpty) {
+      return Response(400,
+          body: jsonEncode({'error': 'Faltan campos requeridos'}),
+          headers: _json);
+    }
+
+    // Correo único
+    final existing =
+        await dbQuery('SELECT 1 FROM usuarios WHERE correo = ?', [correo]);
+    if (existing.isNotEmpty) {
+      return Response(409,
+          body: jsonEncode({'error': 'Correo ya registrado'}), headers: _json);
+    }
+
+    // Subir foto si vino archivo o aceptar URL directa en "foto_perfil"
+    String? fotoUrl = (f['foto_perfil'] ?? '').trim().isEmpty ? null : f['foto_perfil']!.trim();
+    if (parsed.fileBytes != null && parsed.fileBytes!.isNotEmpty) {
+      final up = await _uploadToCloudinary(
+        bytes: parsed.fileBytes!,
+        filename: parsed.fileName ?? 'foto.jpg',
+        mimeType: parsed.fileMime,
+      );
+      if (up != null) fotoUrl = up;
+    }
+
+    // Generar ID único
+    final idUsuario = await _generarIDUnico();
+
+    await dbQuery(
+      '''
+      INSERT INTO usuarios (id_usuario, correo, nombre_usuario, contrasena, es_negocio, foto_perfil)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ''',
+      [idUsuario, correo, nombreUsuario, contrasena, esNegocio, fotoUrl],
+    );
+
+    return Response.ok(jsonEncode({'success': true}), headers: _json);
+  } catch (e, st) {
+    print('Error al registrar usuario: $e\n$st');
+    return Response.internalServerError(
+      body: jsonEncode({'error': 'Error al registrar usuario'}),
+      headers: _json,
+    );
+  }
+}
+
+// POST /api/usuarios/login
+Future<Response> _login(Request req) async {
+  try {
+    final j = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
+    final correo = (j['correo'] ?? '').toString();
+    final contrasena = (j['contrasena'] ?? '').toString();
+
+    final rs = await dbQuery(
+      '''
+      SELECT id_usuario, correo, nombre_usuario, foto_perfil, es_negocio
       FROM usuarios
       WHERE correo = ? AND contrasena = ?
-      LIMIT 1
-    ''', [correo, pass]);
+      ''',
+      [correo, contrasena],
+    );
 
     if (rs.isEmpty) {
       return Response(401,
-        body: jsonEncode({'error': 'Credenciales incorrectas'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Credenciales incorrectas'}),
+          headers: _json);
     }
 
-    final row = rs.first;
-    final usuario = {
-      'id_usuario'    : _jsonSafe(row['id_usuario']),
-      'correo'        : _jsonSafe(row['correo']),
-      'nombre_usuario': _jsonSafe(row['nombre_usuario']),
-      'foto_perfil'   : _jsonSafe(row['foto_perfil']),
-      'es_negocio'    : _toBool(row['es_negocio']) ? 1 : 0, // Node devolvía 0/1
+    final urow = rs.first;
+    final u = {
+      'id_usuario': urow['id_usuario']?.toString(),
+      'correo': urow['correo']?.toString(),
+      'nombre_usuario': urow['nombre_usuario']?.toString(),
+      'foto_perfil': urow['foto_perfil']?.toString(),
+      'es_negocio': urow['es_negocio'],
     };
 
-    // === Shape final igual a Express: { success: true, usuario: {...} } ===
-    return Response.ok(jsonEncode({'success': true, 'usuario': usuario}),
-      headers: _jsonHeaders);
+    return Response.ok(jsonEncode({'success': true, 'usuario': u}), headers: _json);
   } catch (e, st) {
-    print('Error POST /usuarios/login: $e\n$st');
+    print('❌ Error al iniciar sesión: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error': 'Error interno del servidor'}),
-      headers: _jsonHeaders);
+      body: jsonEncode({'error': 'Error al iniciar sesión'}),
+      headers: _json,
+    );
   }
 }
 
-/// ---------- GET /usuarios ----------
-/// Por defecto: ARRAY plano. ?wrap=1 => { ok, count, data }
-/// ?shape=front => llaves en inglés (id,email,name,avatar,isBusiness)
-Future<Response> usuariosHandler(Request req) async {
+// GET /api/usuarios/<id>
+Future<Response> _getUsuarioPorId(Request req, String id) async {
   try {
-    final qp = req.url.queryParameters;
-    final wrap = qp['wrap'] == '1';
-    final shapeFront = qp['shape'] == 'front';
+    final rs = await dbQuery(
+      '''
+      SELECT u.id_usuario, u.nombre_usuario, u.correo, u.foto_perfil, u.es_negocio,
+             v.descripcion, v.localidad
+      FROM usuarios u
+      LEFT JOIN vendedores v ON u.id_usuario = v.id_usuario
+      WHERE u.id_usuario = ?
+      ''',
+      [id],
+    );
 
-    final rs = await dbQuery('''
-      SELECT
-        id_usuario      AS id,
-        correo,
-        nombre_usuario,
-        foto_perfil,
-        es_negocio
-      FROM usuarios
-      ORDER BY nombre_usuario
-    ''');
-
-    final list = rs.map<Map<String, dynamic>>((r) {
-      final base = {
-        'id'            : _jsonSafe(r['id']),
-        'correo'        : _jsonSafe(r['correo']),
-        'nombre_usuario': _jsonSafe(r['nombre_usuario']),
-        'foto_perfil'   : _jsonSafe(r['foto_perfil']),
-        'es_negocio'    : _toBool(r['es_negocio']),
-      };
-      return shapeFront ? mapUserFront(base) : base;
-    }).toList();
-
-    final body = wrap
-      ? jsonEncode({'ok': true, 'count': list.length, 'data': list})
-      : jsonEncode(list);
-
-    return Response.ok(body, headers: _jsonHeaders);
-  } catch (e, st) {
-    print('Error GET /usuarios: $e\n$st');
-    return Response.internalServerError(
-      body: jsonEncode({'error': 'Error interno del servidor'}),
-      headers: _jsonHeaders);
-  }
-}
-
-/// ---------- POST /usuarios ----------
-/// body: { id, correo, nombre_usuario, foto_perfil?, contrasena?, es_negocio? }
-/// Devuelve OBJETO creado. ?shape=front => llaves en inglés
-Future<Response> crearUsuarioHandler(Request req) async {
-  try {
-    final qp = req.url.queryParameters;
-    final shapeFront = qp['shape'] == 'front';
-
-    final bodyStr = await req.readAsString();
-    final j = (bodyStr.isEmpty ? {} : jsonDecode(bodyStr)) as Map<String, dynamic>;
-
-    final id     = (j['id'] ?? j['id_usuario'] ?? '').toString().trim();
-    final correo = (j['correo'] ?? '').toString().trim();
-    final nombre = (j['nombre_usuario'] ?? '').toString().trim();
-    final foto   = (j['foto_perfil'] ?? '').toString().trim();
-    final pass   = (j['contrasena'] ?? '').toString(); // DEMO
-    final esNeg  = (j['es_negocio'] == true || j['es_negocio'] == 1 || '${j['es_negocio']}'.toLowerCase()=='true') ? 1 : 0;
-
-    if (id.isEmpty || correo.isEmpty || nombre.isEmpty) {
-      return Response(400,
-        body: jsonEncode({'error':'Campos requeridos: id, correo, nombre_usuario'}),
-        headers: _jsonHeaders);
-    }
-
-    try {
-      await dbQuery(
-        'INSERT INTO usuarios (id_usuario, correo, nombre_usuario, foto_perfil, contrasena, es_negocio) VALUES (?,?,?,?,?,?)',
-        [id, correo, nombre, foto.isEmpty ? null : foto, pass, esNeg],
-      );
-    } on MySqlException catch (e) {
-      if (e.errorNumber == 1062) {
-        return Response(409,
-          body: jsonEncode({'error':'Usuario ya existe (id o correo duplicado)'}),
-          headers: _jsonHeaders);
-      }
-      rethrow;
-    }
-
-    final createdBase = {
-      'id'            : id,
-      'correo'        : correo,
-      'nombre_usuario': nombre,
-      'foto_perfil'   : foto.isEmpty ? null : foto,
-      'es_negocio'    : esNeg == 1,
-    };
-    final created = shapeFront ? mapUserFront(createdBase) : createdBase;
-
-    return Response(201, body: jsonEncode(created), headers: _jsonHeaders);
-  } catch (e, st) {
-    print('Error POST /usuarios: $e\n$st');
-    return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: _jsonHeaders);
-  }
-}
-
-/// ---------- DELETE /usuarios/<id> ----------
-Future<Response> eliminarUsuarioHandler(Request req, String id) async {
-  try {
-    final r = await dbQuery('DELETE FROM usuarios WHERE id_usuario = ?', [id]);
-    final n = r.affectedRows ?? 0;
-    if (n == 0) {
+    if (rs.isEmpty) {
       return Response(404,
-        body: jsonEncode({'error':'No existe el usuario $id'}),
-        headers: _jsonHeaders);
+          body: jsonEncode({'error': 'Usuario no encontrado'}),
+          headers: _json);
     }
-    return Response.ok(jsonEncode({'ok': true, 'deleted': id}), headers: _jsonHeaders);
+
+    final r = rs.first;
+    final out = {
+      'id_usuario': r['id_usuario']?.toString(),
+      'nombre_usuario': r['nombre_usuario']?.toString(),
+      'correo': r['correo']?.toString(),
+      'foto_perfil': r['foto_perfil']?.toString(),
+      'es_negocio': r['es_negocio'],
+      'descripcion': r['descripcion']?.toString(),
+      'localidad': r['localidad']?.toString(),
+    };
+
+    return Response.ok(jsonEncode(out), headers: _json);
   } catch (e, st) {
-    print('Error DELETE /usuarios/$id: $e\n$st');
+    print('❌ Error al obtener usuario: $e\n$st');
     return Response.internalServerError(
-      body: jsonEncode({'error':'Error interno del servidor'}),
-      headers: _jsonHeaders);
+      body: jsonEncode({'error': 'Error interno del servidor'}),
+      headers: _json,
+    );
   }
 }
 
-/// ---------- GET /usuarios/admin (demo HTML) ----------
-Future<Response> adminUsuariosPageHandler(Request req) async {
-  const html = r'''
-<!doctype html>
-<html lang="es">
-<meta charset="utf-8">
-<title>Admin Usuarios (demo)</title>
-<style>
-  body{font-family:system-ui,Arial;margin:24px;max-width:920px}
-  input,button{padding:8px;margin:4px}
-  table{border-collapse:collapse;margin-top:12px;width:100%}
-  th,td{border:1px solid #ddd;padding:6px 10px}
-  tr:nth-child(even){background:#f6f6f6}
-  .row{display:flex;gap:8px;flex-wrap:wrap}
-  .row > *{flex:1 1 180px}
-</style>
-<h1>Admin Usuarios (demo)</h1>
+// PUT /api/usuarios/<id>
+Future<Response> _putUsuario(Request req, String id) async {
+  try {
+    final j = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
+    final nombreUsuario =
+        j.containsKey('nombre_usuario') ? j['nombre_usuario']?.toString() : null;
+    final localidad = j.containsKey('localidad') ? j['localidad']?.toString() : null;
+    final descripcion =
+        j.containsKey('descripcion') ? j['descripcion']?.toString() : null;
 
-<div class="row">
-  <input id="id" placeholder="id_usuario (char(6))" maxlength="6" required>
-  <input id="correo" placeholder="correo" required>
-  <input id="nombre" placeholder="nombre_usuario" required>
-  <input id="foto" placeholder="foto_perfil (URL)">
-  <input id="pass" placeholder="contrasena (demo)" type="password">
-  <label><input type="checkbox" id="neg"> es_negocio</label>
-</div>
-<button id="crear">Crear usuario</button>
-<button id="refrescar">Refrescar</button>
+    if (nombreUsuario != null) {
+      await dbQuery(
+          'UPDATE usuarios SET nombre_usuario = ? WHERE id_usuario = ?',
+          [nombreUsuario, id]);
+    }
 
-<table id="tabla">
-  <thead><tr><th>id</th><th>correo</th><th>nombre</th><th>negocio</th><th>acciones</th></tr></thead>
-  <tbody></tbody>
-</table>
+    if (localidad != null || descripcion != null) {
+      final ex = await dbQuery('SELECT * FROM vendedores WHERE id_usuario = ?', [id]);
+      if (ex.isEmpty) {
+        await dbQuery(
+          'INSERT INTO vendedores (id_usuario, descripcion, localidad) VALUES (?, ?, ?)',
+          [id, descripcion, localidad],
+        );
+      } else {
+        await dbQuery(
+          'UPDATE vendedores SET descripcion = ?, localidad = ? WHERE id_usuario = ?',
+          [descripcion ?? ex.first['descripcion'], localidad ?? ex.first['localidad'], id],
+        );
+      }
+    }
 
-<script>
-const api=(p,o={})=>fetch(p,o).then(r=>r.json());
-const toList = (r) => Array.isArray(r) ? r : (r?.data ?? []);
-
-async function cargar(){
-  const res = await api('/usuarios');
-  const list = toList(res);
-  const tbody = document.querySelector('#tabla tbody');
-  tbody.innerHTML = '';
-  list.forEach(u => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${u.id}</td>
-      <td>${u.correo||u.email||''}</td>
-      <td>${u.nombre_usuario||u.name||''}</td>
-      <td>${(u.es_negocio ?? u.isBusiness) ? 'Sí':'No'}</td>
-      <td><button data-id="${u.id}" class="del">Eliminar</button></td>`;
-    tbody.appendChild(tr);
-  });
-}
-
-document.querySelector('#refrescar').onclick = cargar;
-
-document.querySelector('#crear').onclick = async () => {
-  const body = {
-    id: document.querySelector('#id').value,
-    correo: document.querySelector('#correo').value,
-    nombre_usuario: document.querySelector('#nombre').value,
-    foto_perfil: document.querySelector('#foto').value,
-    contrasena: document.querySelector('#pass').value,
-    es_negocio: document.querySelector('#neg').checked,
-  };
-  const r = await fetch('/usuarios', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(body)
-  });
-  if (r.ok) { 
-    document.querySelectorAll('input').forEach(i=>{ if(i.type!=='checkbox') i.value=''; else i.checked=false; });
-    cargar(); 
-  } else {
-    const t = await r.text();
-    alert('Error al crear: ' + t);
+    return Response.ok(jsonEncode({'success': true}), headers: _json);
+  } catch (e, st) {
+    print('Error al actualizar usuario: $e\n$st');
+    return Response.internalServerError(
+      body: jsonEncode({'error': 'Error interno del servidor'}),
+      headers: _json,
+    );
   }
-};
-
-document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('.del');
-  if (!btn) return;
-  const id = btn.getAttribute('data-id');
-  const r = await fetch('/usuarios/'+encodeURIComponent(id), {method:'DELETE'});
-  if (r.ok) cargar(); else alert('Error al borrar');
-});
-
-cargar();
-</script>
-</html>
-''';
-  return Response.ok(html, headers: {'Content-Type': 'text/html; charset=utf-8'});
 }
+
+// ------------------------- Router exportado -------------------------
+
+final Router usuariosRouter = Router()
+  ..get('/', _listarUsuarios)
+  ..post('/register', _registrarUsuario)
+  ..post('/login', _login)
+  ..get('/<id|[A-Za-z0-9]+>', (req, id) => _getUsuarioPorId(req, id))
+  ..put('/<id|[A-Za-z0-9]+>', (req, id) => _putUsuario(req, id));

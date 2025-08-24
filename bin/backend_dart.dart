@@ -1,165 +1,100 @@
 // bin/backend_dart.dart
-import 'dart:convert';
 import 'dart:io';
-
+import 'package:dotenv/dotenv.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
-import 'package:dotenv/dotenv.dart';
+import 'package:shelf_static/shelf_static.dart';
 
-import 'package:backend_dart/db.dart';
+// DB
+import 'package:backend_dart/db.dart' show initDb;
 
-// Rutas
-import 'package:backend_dart/routes/shape.dart'; // asegura carga de helpers
-import 'package:backend_dart/routes/categorias.dart';
-import 'package:backend_dart/routes/usuarios.dart';
-import 'package:backend_dart/routes/productos.dart';
-import 'package:backend_dart/routes/producto.dart';
-import 'package:backend_dart/routes/resenas.dart';
-import 'package:backend_dart/routes/carrito.dart';
-import 'package:backend_dart/routes/productos_vendedor.dart';
+// Routers
+import 'package:backend_dart/routes/categorias.dart' show categoriasRouter;
+import 'package:backend_dart/routes/productos.dart' show productosRouter;
+import 'package:backend_dart/routes/producto.dart' show productoRouter;
+import 'package:backend_dart/routes/resenas.dart' show resenasRouter;
+import 'package:backend_dart/routes/usuarios.dart' show usuariosRouter;
+import 'package:backend_dart/routes/productos_vendedor.dart'
+    show productosVendedorRouter;
 
-const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
+// ====== CORS ======
+const _corsHeaders = <String, String>{
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers':
+      'Origin, Content-Type, Accept, Authorization, X-Requested-With',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Type',
+  'Access-Control-Allow-Credentials': 'true',
+};
 
-Future<void> main() async {
-  final env = DotEnv(includePlatformEnvironment: true)..load();
-
-  await initDb(env: env);
-
-  final router = Router()
-    ..get('/', rootHandler)
-
-    // ---------- Categorías ----------
-    ..get('/categorias', categoriasHandler)
-
-    // ---------- Productos (grupo) ----------
-    // GET plano redirige a canónica (solo GET, no POST)
-    ..get('/productos', (req) => Response.found('/productos/'))
-    // Aceptar POST sin slash final para evitar 404
-    ..post('/productos', crearProductoHandler)
-    ..mount(
-      '/productos/',
-      Router()
-        ..get('/', productosHandler)                   // lista completa
-        ..post('/', crearProductoHandler)              // crear
-        ..get('/admin', adminProductosPageHandler)     // demo admin
-        ..get('/<slug>', productosPorCategoriaHandler) // productos por categoría (slug o código)
-        ..delete('/<id>', eliminarProductoHandler),    // eliminar
-    )
-
-    // ---------- Usuarios ----------
-    ..post('/usuarios/login', loginUsuarioHandler)
-    ..get('/usuarios', usuariosHandler)
-    ..post('/usuarios', crearUsuarioHandler)
-    ..delete('/usuarios/<id>', eliminarUsuarioHandler)
-    ..get('/usuarios/admin', adminUsuariosPageHandler)
-
-    // ---------- Producto (detalle + update) ----------
-    ..mount(
-      '/producto/',
-      Router()
-        ..get('/<id>', productoGetHandler)
-        ..put('/<id>', productoUpdateHandler),
-    )
-
-    // ---------- Reseñas ----------
-    ..mount(
-      '/resenas/',
-      Router()
-        ..get('/<id_producto>', resenasPorProductoHandler)
-        ..post('/<id_producto>', crearResenaHandler)
-        ..delete('/<id>', eliminarResenaHandler),
-    )
-
-    // ---------- Carrito ----------
-    ..mount(
-      '/carrito/',
-      Router()
-        ..get('/<id_usuario>', carritoPorUsuarioHandler)
-        ..post('/agregar', agregarAlCarritoHandler)
-        ..post('/disminuir', disminuirDelCarritoHandler)
-        ..delete('/eliminar', eliminarItemCarritoHandler)
-        ..delete('/vaciar/<id_usuario>', vaciarCarritoHandler),
-    )
-
-    // ---------- Productos por vendedor ----------
-    ..mount(
-      '/productosVendedor/',
-      Router()..get('/<vendedorId>', productosDeVendedorHandler),
-    )
-
-    // ---------- Catch-all de slugs de categoría ----------
-    // IMPORTANTÍSIMO: esta ruta VA AL FINAL para no eclipsar otras rutas.
-    // Acepta slugs tipo 'powerbanks', 'baterias-litio', etc.
-    ..get('/<slug|[a-z0-9\\-]+>', (Request req, String slug) {
-      return productosPorCategoriaHandler(req, slug);
-    })
-
-    // ---------- Preflight CORS (explícito) ----------
-    ..options('/<ignored|.*>', _optionsHandler);
-
-  // Pipeline + CORS + JSON 404
-  final handler = Pipeline()
-      .addMiddleware(logRequests())
-      .addMiddleware(_corsMiddleware)
-      .addMiddleware(_jsonErrorMiddleware)
-      .addHandler(router);
-
-  final port = int.tryParse(env['PORT'] ?? '') ?? 8080;
-  final server = await io.serve(handler, InternetAddress.anyIPv4, port);
-  print('Backend escuchando en http://${server.address.host}:$port');
-
-  // Apagado limpio (CTRL+C y SIGTERM)
-  void _shutdown() async {
-    print('\nApagando…');
-    await closeDb();
-    await server.close(force: true);
-    exit(0);
-  }
-
-  ProcessSignal.sigint.watch().listen((_) => _shutdown());
-  if (Platform.isLinux || Platform.isMacOS) {
-    ProcessSignal.sigterm.watch().listen((_) => _shutdown());
-  }
+Middleware _cors() {
+  return (Handler inner) {
+    return (Request req) async {
+      if (req.method == 'OPTIONS') {
+        return Response.ok('', headers: _corsHeaders);
+      }
+      final res = await inner(req);
+      return res.change(headers: _corsHeaders);
+    };
+  };
 }
 
-const _corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
-};
+Response _redir308(String to) => Response(308, headers: {'Location': to});
 
-Middleware get _corsMiddleware => (inner) => (request) async {
-  if (request.method == 'OPTIONS') return Response.ok('', headers: _corsHeaders);
-  final res = await inner(request);
-  return res.change(headers: {...res.headers, ..._corsHeaders});
-};
+void main(List<String> args) async {
+  // 1) .env
+  final env = DotEnv()..load();
+  final port = int.tryParse(env['PORT'] ?? '') ?? 3001;
 
-// Devuelve 404 en JSON en vez de "Route not found" en texto plano
-Middleware get _jsonErrorMiddleware => (inner) {
-  return (Request req) async {
-    final res = await inner(req);
-    if (res.statusCode == 404) {
-      return Response.notFound(
-        jsonEncode({'error': 'Route not found', 'path': '/${req.url}'}),
-        headers: _jsonHeaders,
-      );
-    }
-    return res;
-  };
-};
+  // 2) DB (¡¡clave para evitar el error!!):
+  // tu initDb() debería leer DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME del .env
+  await initDb();
+  print('✓ DB inicializada');
 
-Future<Response> _optionsHandler(Request request) async =>
-    Response.ok('', headers: _corsHeaders);
+  // 3) Router principal
+  final router = Router();
 
-final _startedAt = DateTime.now();
+  // Raíz
+  router.get('/', (Request req) {
+    return Response.ok('API Lumina funcionando ✅',
+        headers: {'Content-Type': 'text/plain; charset=utf-8'});
+  });
 
-Future<Response> rootHandler(Request req) async {
-  final body = {
-    'ok': true,
-    'name': 'Backend Dart API',
-    'uptime_s': DateTime.now().difference(_startedAt).inSeconds,
-    'db': await dbAlive() ? 'up' : 'down',
-  };
-  return Response.ok(jsonEncode(body), headers: _jsonHeaders);
+  // /uploads solo si existe carpeta
+  final uploadsDir = env['UPLOADS_DIR'] ?? 'uploads';
+  final dir = Directory(uploadsDir);
+  if (dir.existsSync()) {
+    final uploadsHandler =
+        createStaticHandler(uploadsDir, listDirectories: false);
+    router.mount('/uploads/', uploadsHandler);
+    print('✓ /uploads servido desde "$uploadsDir"');
+  } else {
+    print('⚠️ Carpeta "$uploadsDir" no encontrada; /uploads deshabilitado');
+  }
+
+  // Redirecciones para aceptar sin barra final
+  router.get('/api/categorias', (req) => _redir308('/api/categorias/'));
+  router.get('/api/productos', (req) => _redir308('/api/productos/'));
+  router.get('/api/producto', (req) => _redir308('/api/producto/'));
+  router.get('/api/resenas', (req) => _redir308('/api/resenas/'));
+  router.get('/api/usuarios', (req) => _redir308('/api/usuarios/'));
+  router.get('/api/productosVendedor',
+      (req) => _redir308('/api/productosVendedor/'));
+
+  // Rutas /api/*
+  router.mount('/api/categorias/', categoriasRouter);
+  router.mount('/api/productos/', productosRouter);
+  router.mount('/api/producto/', productoRouter);
+  router.mount('/api/resenas/', resenasRouter);
+  router.mount('/api/usuarios/', usuariosRouter);
+  router.mount('/api/productosVendedor/', productosVendedorRouter);
+
+  final handler = const Pipeline()
+      .addMiddleware(logRequests())
+      .addMiddleware(_cors())
+      .addHandler(router);
+
+  final server = await io.serve(handler, InternetAddress.anyIPv4, port);
+  print('Backend escuchando en http://${server.address.address}:${server.port}');
 }

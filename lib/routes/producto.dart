@@ -1,64 +1,45 @@
-// lib/routes/producto.dart
+// Endpoints:
+//   GET  /api/producto/<id>
+//   PUT  /api/producto/<id>
+
+
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
-import 'package:backend_dart/db.dart';
-import 'package:mysql1/mysql1.dart' show Blob;
-import 'package:backend_dart/routes/shape.dart' show mapProductoFront;
+import 'package:shelf_router/shelf_router.dart';
+import 'package:backend_dart/db.dart' show dbQuery;
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
-dynamic _jsonSafe(Object? v) {
-  if (v == null) return null;
-  if (v is DateTime) return v.toIso8601String();
-  if (v is BigInt) return v.toString();
-  if (v is Uint8List) return base64Encode(v);
-  if (v is Blob) {
-    final b = v.toBytes();
-    try {
-      return utf8.decode(b);
-    } catch (_) {
-      return base64Encode(b);
-    }
-  }
-  return v;
-}
-
-bool _toBool(dynamic v) {
-  if (v is bool) return v;
-  if (v is num) return v != 0;
-  if (v is String) return v == '1' || v.toLowerCase() == 'true';
-  return false;
-}
-
-/// ---------- GET /producto/<id> ----------
-/// - Por defecto devuelve llaves en español.
-/// - ?shape=front => llaves en inglés (name, price, image, sellerId, sellerName, ...)
-/// - ?wrap=1 => { ok, data }
-Future<Response> productoGetHandler(Request req, String id) async {
+// ====== GET /api/producto/<id> ======
+Future<Response> _getProductoPorId(Request req, String idStr) async {
   try {
-    final qp = req.url.queryParameters;
-    final shapeFront = qp['shape'] == 'front';
-    final wrap = qp['wrap'] == '1';
+    final id = int.tryParse(idStr);
+    if (id == null) {
+      return Response(400,
+          body: jsonEncode({'error': 'ID inválido'}),
+          headers: _jsonHeaders);
+    }
 
-    final rs = await dbQuery('''
+    final rs = await dbQuery(
+      '''
       SELECT 
-        p.id_producto                 AS id,
-        p.nombre,
-        CAST(p.descripcion AS CHAR)   AS descripcion,
-        p.precio,
-        p.estado,
-        p.envio_rapido,
-        p.codigo_categoria,
-        p.stock,
-        u.id_usuario                  AS vendedor_id,
-        u.nombre_usuario              AS vendedor_nombre,
-        u.correo                      AS vendedor_correo
-      FROM productos p
-      LEFT JOIN usuarios u ON u.id_usuario = p.id_vendedor
-      WHERE p.id_producto = ?
-      LIMIT 1
-    ''', [id]);
+         p.id_producto AS id,
+         p.nombre       AS name,
+         p.descripcion  AS descripcion,
+         p.precio       AS price,
+         COALESCE(f.url_imagen, 'https://placehold.co/300x400') AS image,
+         p.stock        AS stock,
+         p.id_vendedor  AS sellerId,
+         u.nombre_usuario AS sellerName,
+         u.correo         AS sellerEmail
+       FROM productos p
+       JOIN usuarios u      ON p.id_vendedor = u.id_usuario
+       LEFT JOIN fotos_producto f ON f.id_producto = p.id_producto
+       WHERE p.id_producto = ?
+       LIMIT 1
+      ''',
+      [id],
+    );
 
     if (rs.isEmpty) {
       return Response(404,
@@ -66,38 +47,23 @@ Future<Response> productoGetHandler(Request req, String id) async {
           headers: _jsonHeaders);
     }
 
-    final base = rs.first;
+    final row = rs.first;
 
-    final fotos = await dbQuery('''
-      SELECT CAST(url AS CHAR) AS url
-      FROM fotos_producto
-      WHERE id_producto = ?
-      ORDER BY id_foto ASC
-    ''', [id]);
-
-    final dataEs = {
-      'id'              : _jsonSafe(base['id']),
-      'nombre'          : _jsonSafe(base['nombre']),
-      'descripcion'     : _jsonSafe(base['descripcion']),
-      'precio'          : (base['precio'] as num?)?.toDouble() ?? 0.0,
-      'estado'          : _jsonSafe(base['estado']),
-      'envio_rapido'    : _toBool(base['envio_rapido']),
-      'codigo_categoria': _jsonSafe(base['codigo_categoria']),
-      'stock'           : (base['stock'] as num?)?.toInt() ?? 0,
-      'vendedor'        : {
-        'id'    : _jsonSafe(base['vendedor_id']),
-        'nombre': _jsonSafe(base['vendedor_nombre']),
-        'correo': _jsonSafe(base['vendedor_correo']),
-      },
-      'fotos'           : fotos.map((r) => _jsonSafe(r['url'])).toList(),
+    final out = {
+      'id': row['id'],
+      'name': row['name']?.toString(),
+      'descripcion': row['descripcion']?.toString(),
+      'price': '${row['price']}',
+      'image': row['image']?.toString(),
+      'stock': (row['stock'] is num) ? (row['stock'] as num).toInt() : row['stock'],
+      'sellerId': row['sellerId']?.toString(),
+      'sellerName': row['sellerName']?.toString(),
+      'sellerEmail': row['sellerEmail']?.toString(),
     };
 
-    final bodyObj = shapeFront ? mapProductoFront(dataEs) : dataEs;
-    final body = wrap ? {'ok': true, 'data': bodyObj} : bodyObj;
-
-    return Response.ok(jsonEncode(body), headers: _jsonHeaders);
+    return Response.ok(jsonEncode(out), headers: _jsonHeaders);
   } catch (e, st) {
-    print('Error GET /producto/$id: $e\n$st');
+    print('Error al obtener producto: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error interno del servidor'}),
       headers: _jsonHeaders,
@@ -105,60 +71,99 @@ Future<Response> productoGetHandler(Request req, String id) async {
   }
 }
 
-/// ---------- PUT /producto/<id> ----------
-/// Acepta campos en español o inglés:
-///  - nombre|name, descripcion|description, stock|quantity,
-///  - precio|price, estado|status, envio_rapido (bool|0/1|'true'/'false')
-/// Devuelve el producto actualizado (respeta ?shape=front y ?wrap=1).
-Future<Response> productoUpdateHandler(Request req, String id) async {
+// ====== PUT /api/producto/<id> ======
+Future<Response> _putActualizarProducto(Request req, String idStr) async {
   try {
-    final j = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
-
-    // normalización de nombres
-    final nombre       = j.containsKey('nombre')       ? j['nombre']       : j['name'];
-    final descripcion  = j.containsKey('descripcion')  ? j['descripcion']  : j['description'];
-    final stock        = j.containsKey('stock')        ? j['stock']        : j['quantity'];
-    final precio       = j.containsKey('precio')       ? j['precio']       : j['price'];
-    final estado       = j.containsKey('estado')       ? j['estado']       : j['status'];
-    final envioRap     = j['envio_rapido'];
-
-    final sets = <String>[];
-    final params = <dynamic>[];
-
-    void add(String col, dynamic val) {
-      sets.add('$col = ?');
-      params.add(val);
-    }
-
-    if (nombre != null)      add('nombre', nombre);
-    if (descripcion != null) add('descripcion', descripcion);
-    if (stock != null)       add('stock', int.tryParse('$stock') ?? stock);
-    if (precio != null)      add('precio', num.tryParse('$precio') ?? precio);
-    if (estado != null)      add('estado', estado);
-    if (envioRap != null) {
-      final b = (envioRap == true || envioRap == 1 || '$envioRap'.toLowerCase() == 'true') ? 1 : 0;
-      add('envio_rapido', b);
-    }
-
-    if (sets.isEmpty) {
+    final id = int.tryParse(idStr);
+    if (id == null) {
       return Response(400,
-          body: jsonEncode({
-            'error':
-                'No hay campos válidos para actualizar (nombre|name, descripcion|description, stock|quantity, precio|price, estado|status, envio_rapido)'
-          }),
+          body: jsonEncode({'error': 'ID inválido'}),
           headers: _jsonHeaders);
     }
 
-    params.add(id);
-    await dbQuery('UPDATE productos SET ${sets.join(', ')} WHERE id_producto = ?', params);
+    final body =
+        (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
+    final nombre      = body['nombre'];
+    final descripcion = body['descripcion'];
+    final stock       = body['stock'];
 
-    // Reutilizamos el GET para devolver con el mismo shape/wrap que pidió el cliente
-    return productoGetHandler(req, id);
+    // Existe?
+    final existe = await dbQuery(
+      'SELECT * FROM productos WHERE id_producto = ?',
+      [id],
+    );
+    if (existe.isEmpty) {
+      return Response(404,
+          body: jsonEncode({'error': 'Producto no encontrado'}),
+          headers: _jsonHeaders);
+    }
+    final cur = existe.first;
+
+    final nuevoNombre = (nombre ?? cur['nombre'])?.toString();
+    final nuevaDescripcion = (descripcion ?? cur['descripcion'])?.toString();
+    final nuevoStock = (stock ?? cur['stock']);
+
+    // Actualizar
+    final upd = await dbQuery(
+      '''
+      UPDATE productos
+      SET nombre = ?, descripcion = ?, stock = ?
+      WHERE id_producto = ?
+      ''',
+      [nuevoNombre, nuevaDescripcion, nuevoStock, id],
+    );
+
+    final affected = upd.affectedRows ?? 0;
+    if (affected == 0) {
+      return Response(404,
+          body: jsonEncode({'error': 'No se actualizó ningún producto'}),
+          headers: _jsonHeaders);
+    }
+
+    // Devolver versión resumida
+    final sel = await dbQuery(
+      '''
+      SELECT 
+         id_producto AS id, 
+         nombre      AS name, 
+         descripcion, 
+         precio      AS price, 
+         stock
+      FROM productos 
+      WHERE id_producto = ?
+      ''',
+      [id],
+    );
+
+    final r = sel.first;
+    final out = {
+      'id': r['id'],
+      'name': r['name']?.toString(),
+      'descripcion': r['descripcion']?.toString(),
+      'price': '${r['price']}',
+      'stock': (r['stock'] is num) ? (r['stock'] as num).toInt() : r['stock'],
+    };
+
+    return Response.ok(jsonEncode(out), headers: _jsonHeaders);
   } catch (e, st) {
-    print('Error PUT /producto/$id: $e\n$st');
+    print('❌ Error al actualizar producto: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error interno del servidor'}),
       headers: _jsonHeaders,
     );
   }
 }
+
+Future<Response> _debugCatchAll(Request req, String _path) async {
+  print('[DEBUG producto.dart] Método: ${req.method}, URL: ${req.requestedUri}');
+  return Response.notFound(
+    jsonEncode({'error': 'Ruta no encontrada dentro de producto.dart'}),
+    headers: _jsonHeaders,
+  );
+}
+
+// ====== Router exportado ======
+final Router productoRouter = Router()
+  ..get('/<id|[0-9]+>', (req, id) => _getProductoPorId(req, id))
+  ..put('/<id|[0-9]+>', (req, id) => _putActualizarProducto(req, id))
+  ..all('/<path|.*>', (req, path) => _debugCatchAll(req, path));
