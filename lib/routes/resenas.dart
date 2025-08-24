@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:backend_dart/db.dart';
 import 'package:mysql1/mysql1.dart' show Blob;
-import 'package:backend_dart/routes/shape.dart' show mapResenasFront, mapResenaFront;
+import 'package:backend_dart/routes/shape.dart' show mapResenasFront;
 
 const _jsonHeaders = {'Content-Type': 'application/json; charset=utf-8'};
 
@@ -93,8 +93,6 @@ Future<Response> crearResenaHandler(Request req, String idProducto) async {
     final qp = req.url.queryParameters;
     final shapeFront = qp['shape'] == 'front';
     final wrapParam = qp['wrap'];
-    final wrap = wrapParam == null ? true : wrapParam == '1';
-
     final body = (jsonDecode(await req.readAsString()) as Map<String, dynamic>?) ?? {};
     final idUsuario   = (body['id_usuario'] ?? body['userId'] ?? '').toString().trim();
     final calificacion= _toInt(body['calificacion'] ?? body['rating']);

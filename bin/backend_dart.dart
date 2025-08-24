@@ -10,7 +10,6 @@ import 'package:dotenv/dotenv.dart';
 import 'package:backend_dart/db.dart';
 
 // Rutas
-import 'package:backend_dart/routes/shape.dart';                // utilidades de mapeo (asegura import)
 import 'package:backend_dart/routes/categorias.dart';
 import 'package:backend_dart/routes/usuarios.dart';
 import 'package:backend_dart/routes/productos.dart';
@@ -28,23 +27,26 @@ Future<void> main() async {
 
   final router = Router()
     ..get('/', rootHandler)
+    ..get('/healthz', (Request _) => Response.ok(
+          jsonEncode({'ok': true}),
+          headers: _jsonHeaders,
+        ))
+    ..get('/favicon.ico', (Request _) => Response.notFound('')) // evita ruido
 
     // ---------- Categorías ----------
     ..get('/categorias', categoriasHandler)
 
     // ---------- Productos (grupo) ----------
-    // GET plano redirige a canónica (solo GET, no POST)
-    ..get('/productos', (req) => Response.found('/productos/'))
-    // Aceptar POST sin slash final para evitar 404
-    ..post('/productos', crearProductoHandler)
+    ..get('/productos', (req) => Response.found('/productos/')) // canónica
+    ..post('/productos', crearProductoHandler)                   // sin slash
     ..mount(
       '/productos/',
       Router()
-        ..get('/', productosHandler)                 // lista completa
-        ..post('/', crearProductoHandler)            // crear
-        ..get('/admin', adminProductosPageHandler)   // demo admin
-        ..get('/<slug>', productosPorCategoriaHandler) // productos por categoría (slug o código)
-        ..delete('/<id>', eliminarProductoHandler),  // eliminar
+        ..get('/', productosHandler)
+        ..post('/', crearProductoHandler)
+        ..get('/admin', adminProductosPageHandler)
+        ..get('/<slug>', productosPorCategoriaHandler) // listar por categoría
+        ..delete('/<id>', eliminarProductoHandler),
     )
 
     // ---------- Usuarios ----------
@@ -91,13 +93,14 @@ Future<void> main() async {
     // ---------- Preflight CORS (explícito) ----------
     ..options('/<ignored|.*>', _optionsHandler);
 
-  // Pipeline + CORS
+  // Pipeline: logs + CORS + catch-all de errores
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(_corsMiddleware)
+      .addMiddleware(_jsonErrorMiddleware) // 500 en JSON
       .addHandler(router);
 
-  // Envolver para devolver 404 en JSON (evita texto plano de shelf_router)
+  // Envolver para devolver 404 en JSON (en lugar de texto plano)
   Future<Response> app(Request req) async {
     final res = await handler(req);
     if (res.statusCode == 404) {
@@ -134,9 +137,27 @@ const _corsHeaders = {
 };
 
 Middleware get _corsMiddleware => (inner) => (request) async {
-  if (request.method == 'OPTIONS') return Response.ok('', headers: _corsHeaders);
+  if (request.method == 'OPTIONS') {
+    return Response.ok('', headers: _corsHeaders);
+  }
   final res = await inner(request);
   return res.change(headers: {...res.headers, ..._corsHeaders});
+};
+
+// Middleware que captura excepciones y responde JSON 500
+Middleware get _jsonErrorMiddleware => (inner) {
+  return (Request req) async {
+    try {
+      return await inner(req);
+    } catch (e, st) {
+      // Log en servidor
+      print('Unhandled error for ${req.method} /${req.url}: $e\n$st');
+      return Response.internalServerError(
+        body: jsonEncode({'error': 'Internal server error'}),
+        headers: _jsonHeaders,
+      );
+    }
+  };
 };
 
 Future<Response> _optionsHandler(Request request) async =>
@@ -145,11 +166,20 @@ Future<Response> _optionsHandler(Request request) async =>
 final _startedAt = DateTime.now();
 
 Future<Response> rootHandler(Request req) async {
+  // No bloquees el home si la DB está lenta: da 1.5s para el check.
+  bool alive = false;
+  try {
+    alive = await dbAlive().timeout(const Duration(milliseconds: 1500),
+        onTimeout: () => false);
+  } catch (_) {
+    alive = false;
+  }
+
   final body = {
     'ok': true,
     'name': 'Backend Dart API',
     'uptime_s': DateTime.now().difference(_startedAt).inSeconds,
-    'db': await dbAlive() ? 'up' : 'down',
+    'db': alive ? 'up' : 'down',
   };
   return Response.ok(jsonEncode(body), headers: _jsonHeaders);
 }

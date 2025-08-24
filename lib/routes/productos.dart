@@ -238,7 +238,7 @@ Future<Response> crearProductoHandler(Request req) async {
       'id_vendedor'     : idVendedor,
       'nombre'          : nombre,
       'descripcion'     : desc,
-      'precio'          : (precio as num).toDouble(),
+      'precio'          : precio.toDouble(),
       'estado'          : estado,
       'envio_rapido'    : envioRap == 1,
       'codigo_categoria': codCat,
