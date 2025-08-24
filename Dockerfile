@@ -1,24 +1,22 @@
-# ========== Build ==========
+# ========= Build =========
 FROM dart:stable AS build
 WORKDIR /app
 
-# Cache de dependencias
+# Cache deps
 COPY pubspec.* ./
 RUN dart pub get
 
 # Código y build AOT
 COPY . .
 RUN dart pub get --offline
-RUN dart compile exe bin/backend_dart.dart -o /app/bin/server
+RUN dart compile exe bin/backend_dart.dart -o /app/server
 
-# ========== Runtime ==========
-FROM dart:stable-runtime
+# ========= Runtime (simple) =========
+FROM dart:stable
 WORKDIR /app
-# runtime de Dart (necesario para binario AOT)
-COPY --from=build /runtime/ /runtime/
-COPY --from=build /app/bin/server /app/server
+COPY --from=build /app/server /app/server
 
-# Render asigna el puerto en $PORT
+# Render te da $PORT, debes escucharlo en 0.0.0.0
 ENV PORT=8080
 EXPOSE 8080
 CMD ["/app/server"]
