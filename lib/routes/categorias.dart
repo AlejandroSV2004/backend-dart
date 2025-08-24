@@ -1,6 +1,7 @@
-
+// lib/routes/categorias.dart
 // GET /api/categorias/
-// Lee: SELECT codigo_categoria AS id, nombre, descripcion, slug FROM categorias
+// SELECT codigo_categoria AS id, nombre, descripcion, slug FROM categorias
+
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -18,11 +19,7 @@ dynamic _jsonSafe(Object? v) {
   if (v is Uint8List) return base64Encode(v);
   if (v is Blob) {
     final b = v.toBytes();
-    try {
-      return utf8.decode(b);
-    } catch (_) {
-      return base64Encode(b);
-    }
+    try { return utf8.decode(b); } catch (_) { return base64Encode(b); }
   }
   return v;
 }
@@ -34,11 +31,10 @@ final Router categoriasRouter = Router()
         'SELECT codigo_categoria AS id, nombre, descripcion, slug FROM categorias',
       );
 
-      const icons = [
-        'Battery', 'Zap', 'Sun', 'Settings', 'Home', 'Grid3X3', 'Smartphone'
-      ];
-      const colors = ['blue', 'yellow', 'green', 'red', 'purple', 'indigo', 'teal'];
+      const icons  = ['Battery','Zap','Sun','Settings','Home','Grid3X3','Smartphone'];
+      const colors = ['blue','yellow','green','red','purple','indigo','teal'];
       final rnd = Random();
+
       final enriched = <Map<String, dynamic>>[];
       var i = 0;
       for (final row in rows) {
@@ -56,11 +52,7 @@ final Router categoriasRouter = Router()
 
       return Response.ok(jsonEncode(enriched), headers: _jsonHeaders);
     } catch (e, st) {
-      print('Error al obtener categorías: $e');
-      print(st);
-      return Response.internalServerError(
-        body: jsonEncode({'error': 'Error interno del servidor'}),
-        headers: _jsonHeaders,
-      );
+      print('Error al obtener categorías: $e\n$st');
+      return Response.ok(jsonEncode(<Map<String, dynamic>>[]), headers: _jsonHeaders);
     }
   });
