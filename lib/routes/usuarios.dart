@@ -1,13 +1,13 @@
-
 // Endpoints:
 //   GET    /api/usuarios
-//   POST   /api/usuarios/register        (multipart/form-data o JSON; campo archivo: "foto_perfil")
+//   POST   /api/usuarios/register        (multipart/form-data o JSON; archivo: "foto_perfil")
 //   POST   /api/usuarios/login           (JSON {correo, contrasena})
-//   GET    /api/usuarios/<id>            (alfa-num de 6 chars normalmente)
-//   PUT    /api/usuarios/<id>            (JSON {nombre_usuario?, localidad?, descripcion?})
+//   GET    /api/usuarios/<id>
+//   PUT    /api/usuarios/<id>
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -52,41 +52,87 @@ String _signParams(Map<String, String> params, String apiSecret) {
   return sha1.convert(utf8.encode('$toSign$apiSecret')).toString();
 }
 
-/// Sube bytes a Cloudinary
+/// Lee primero de Platform.environment y luego de .env (si existe)
+String? _envGet(String key) {
+  final fromProc = Platform.environment[key];
+  if (fromProc != null && fromProc.isNotEmpty) return fromProc;
+  try {
+    if (File('.env').existsSync()) {
+      final e = DotEnv()..load();
+      final v = e[key];
+      if (v != null && v.isNotEmpty) return v;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/// Soporta CLOUD_NAME/CLOUD_API_KEY/CLOUD_API_SECRET (Render)
+/// y también CLOUDINARY_URL=cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+({String? cloud, String? apiKey, String? apiSecret, String? uploadPreset})
+_cloudinaryCreds() {
+  String? cloud = _envGet('CLOUD_NAME') ?? _envGet('CLOUDINARY_CLOUD_NAME');
+  String? apiKey = _envGet('CLOUD_API_KEY') ?? _envGet('CLOUDINARY_API_KEY');
+  String? apiSecret =
+      _envGet('CLOUD_API_SECRET') ?? _envGet('CLOUDINARY_API_SECRET');
+  String? uploadPreset = _envGet('CLOUD_UPLOAD_PRESET');
+
+  final url = _envGet('CLOUDINARY_URL');
+  if ((cloud == null || apiKey == null || apiSecret == null) &&
+      url != null &&
+      url.startsWith('cloudinary://')) {
+    final m = RegExp(r'^cloudinary://([^:]+):([^@]+)@(.+)$').firstMatch(url);
+    if (m != null) {
+      apiKey ??= m.group(1);
+      apiSecret ??= m.group(2);
+      cloud ??= m.group(3);
+    }
+  }
+  return (cloud: cloud, apiKey: apiKey, apiSecret: apiSecret, uploadPreset: uploadPreset);
+}
+
+/// Sube bytes a Cloudinary (firmado o unsigned)
 Future<String?> _uploadToCloudinary({
   required Uint8List bytes,
   required String filename,
   String? mimeType,
 }) async {
-  final env = DotEnv()..load();
-  final cloud = env['CLOUD_NAME'] ?? env['CLOUDINARY_CLOUD_NAME'];
-  final apiKey = env['CLOUD_API_KEY'] ?? env['CLOUDINARY_API_KEY'];
-  final apiSecret = env['CLOUD_API_SECRET'] ?? env['CLOUDINARY_API_SECRET'];
-  final uploadPreset = env['CLOUD_UPLOAD_PRESET'];
+  final creds = _cloudinaryCreds();
+  final cloud = creds.cloud;
+  final apiKey = creds.apiKey;
+  final apiSecret = creds.apiSecret;
+  final uploadPreset = creds.uploadPreset;
 
-  if (cloud == null || apiKey == null || (uploadPreset == null && apiSecret == null)) {
-    print('⚠️ Cloudinary vars faltantes (CLOUD_NAME/CLOUD_API_KEY/[CLOUD_UPLOAD_PRESET|CLOUD_API_SECRET])');
+  if (cloud == null) {
+    print('⚠️ CLOUD_NAME/CLOUDINARY_CLOUD_NAME o CLOUDINARY_URL no configurado');
     return null;
   }
 
   final uri = Uri.parse('https://api.cloudinary.com/v1_1/$cloud/image/upload');
   final req = http.MultipartRequest('POST', uri);
 
+  // Igual que en tu Node
   req.fields['folder'] = 'usuarios';
   req.fields['transformation'] = 'c_limit,w_500,h_500';
 
   if (uploadPreset != null && uploadPreset.isNotEmpty) {
-    // Unsigned upload (más simple)
+    // 🔓 Unsigned upload (requiere un Upload Preset UNSIGNED creado en Cloudinary)
     req.fields['upload_preset'] = uploadPreset;
   } else {
-    // Signed upload
+    // 🔐 Signed upload
+    if (apiKey == null || apiSecret == null) {
+      print('⚠️ Falta CLOUD_API_KEY/CLOUD_API_SECRET (o CLOUDINARY_URL)');
+      return null;
+    }
     final timestamp = (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
+
+    // Firmar EXACTAMENTE los mismos parámetros que mandamos (orden alfabético)
     final paramsToSign = <String, String>{
       'folder': 'usuarios',
-      'transformation': 'c_limit,w_500,h_500',
       'timestamp': timestamp,
+      'transformation': 'c_limit,w_500,h_500',
     };
-    final signature = _signParams(paramsToSign, apiSecret!);
+    final signature = _signParams(paramsToSign, apiSecret);
+
     req.fields.addAll({
       'timestamp': timestamp,
       'api_key': apiKey,
@@ -107,13 +153,14 @@ Future<String?> _uploadToCloudinary({
   if (resp.statusCode >= 200 && resp.statusCode < 300) {
     final data = jsonDecode(body) as Map<String, dynamic>;
     return (data['secure_url'] ?? data['url'])?.toString();
-  } else {
-    print('❌ Cloudinary ${resp.statusCode}: $body');
-    return null;
   }
+
+  // Log detallado para depurar desde Render
+  print('❌ Cloudinary ${resp.statusCode}: $body');
+  return null;
 }
 
-
+/// Parse de register: multipart o JSON puro
 Future<({
   Map<String, String> fields,
   Uint8List? fileBytes,
@@ -188,7 +235,7 @@ Future<Response> _listarUsuarios(Request req) async {
 
     return Response.ok(jsonEncode(list), headers: _json);
   } catch (e, st) {
-    print('❌ Error en /api/usuarios: $e\n$st');
+    print('Error en /api/usuarios: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error al obtener usuarios'}),
       headers: _json,
@@ -214,23 +261,27 @@ Future<Response> _registrarUsuario(Request req) async {
           headers: _json);
     }
 
-    // Correo único
     final existing =
         await dbQuery('SELECT 1 FROM usuarios WHERE correo = ?', [correo]);
     if (existing.isNotEmpty) {
       return Response(409,
           body: jsonEncode({'error': 'Correo ya registrado'}), headers: _json);
     }
+    String? fotoUrl =
+        (f['foto_perfil'] ?? '').trim().isEmpty ? null : f['foto_perfil']!.trim();
 
-    // Subir foto si vino archivo o aceptar URL directa en "foto_perfil"
-    String? fotoUrl = (f['foto_perfil'] ?? '').trim().isEmpty ? null : f['foto_perfil']!.trim();
     if (parsed.fileBytes != null && parsed.fileBytes!.isNotEmpty) {
       final up = await _uploadToCloudinary(
         bytes: parsed.fileBytes!,
         filename: parsed.fileName ?? 'foto.jpg',
         mimeType: parsed.fileMime,
       );
-      if (up != null) fotoUrl = up;
+      if (up == null) {
+        return Response(502,
+          body: jsonEncode({'error': 'No se pudo subir imagen a Cloudinary'}),
+          headers: _json);
+      }
+      fotoUrl = up;
     }
 
     // Generar ID único
@@ -287,7 +338,7 @@ Future<Response> _login(Request req) async {
 
     return Response.ok(jsonEncode({'success': true, 'usuario': u}), headers: _json);
   } catch (e, st) {
-    print('❌ Error al iniciar sesión: $e\n$st');
+    print('Error al iniciar sesión: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error al iniciar sesión'}),
       headers: _json,
@@ -328,7 +379,7 @@ Future<Response> _getUsuarioPorId(Request req, String id) async {
 
     return Response.ok(jsonEncode(out), headers: _json);
   } catch (e, st) {
-    print('❌ Error al obtener usuario: $e\n$st');
+    print('Error al obtener usuario: $e\n$st');
     return Response.internalServerError(
       body: jsonEncode({'error': 'Error interno del servidor'}),
       headers: _json,
