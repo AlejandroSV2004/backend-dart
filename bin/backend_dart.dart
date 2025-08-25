@@ -43,7 +43,6 @@ Response _redir308(String to) => Response(308, headers: {'Location': to});
 void main(List<String> args) async {
 
   final env = DotEnv()..load();
-  // reemplaza la línea del puerto por esta:
   final port = int.tryParse(Platform.environment['PORT'] ?? '') ??
               int.tryParse((DotEnv()..load())['PORT'] ?? '') ??
               3001;
